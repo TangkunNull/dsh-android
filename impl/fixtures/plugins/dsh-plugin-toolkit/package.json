@@ -1,0 +1,19 @@
+{
+  "name": "dsh-plugin-toolkit",
+  "version": "0.20.38",
+  "description": "Preflight, release and test DeepSeek Harness plugins: check a folder or any GitHub repository, wait for npm to actually serve the version, and keep the market index honest.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-toolkit@0.20.38/client.js"
+}

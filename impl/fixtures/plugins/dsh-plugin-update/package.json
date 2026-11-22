@@ -1,0 +1,5 @@
+{
+  "name": "dsh-plugin-update",
+  "version": "0.18.39",
+  "entry": "dist/client.js"
+}

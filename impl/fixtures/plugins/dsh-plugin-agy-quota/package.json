@@ -1,0 +1,19 @@
+{
+  "name": "dsh-plugin-agy-quota",
+  "version": "1.0.2",
+  "description": "DeepSeek Harness plugin for Antigravity Gemini quota monitoring in settings submenu agy-quota",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-agy-quota@1.0.2/client.js"
+}

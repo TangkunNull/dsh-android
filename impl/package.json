@@ -1,0 +1,25 @@
+{
+  "name": "dsh-native-runtime",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "dsh client-half host: module loader + React reconciler emitting widget IR",
+  "scripts": {
+    "probe": "node tools/probe.mjs",
+    "probe:gateway": "node tools/probe-gateway.mjs",
+    "probe:suite": "node tools/probe-suite.mjs",
+    "probe:inproc": "node tools/probe-inproc.mjs",
+    "test": "node --test tools/*.test.mjs",
+    "layout": "node tools/layout.mjs"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-reconciler": "^0.34.0",
+    "scheduler": "^0.27.0",
+    "yoga-layout": "^3.2.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-sandbox": "0.2.2-rc.1",
+    "ws": "^8.23.0"
+  }
+}

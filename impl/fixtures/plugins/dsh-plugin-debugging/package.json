@@ -1,0 +1,17 @@
+{
+  "name": "dsh-plugin-debugging",
+  "version": "0.8.1",
+  "description": "For DSH plugin development: runtime diagnostics and in-place fixes your agent can run itself.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-debugging@0.8.1/lib/client.js"
+}

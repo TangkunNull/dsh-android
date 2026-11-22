@@ -1,0 +1,7 @@
+// AGP 8.5 is the newest version that pairs with Gradle 8.7; both are pinned so
+// the build is reproducible on a machine that only has the wrapper.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+    id 'com.android.library' version '8.5.2' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+}

@@ -1,0 +1,5 @@
+{
+  "name": "@deepseek-ai/dsh-user-questions",
+  "version": "0.2.2-rc.1",
+  "description": "User-questions capability seam: AskUserQuestionItem/Option/AnswerItem shapes"
+}

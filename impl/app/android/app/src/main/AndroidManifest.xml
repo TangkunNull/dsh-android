@@ -1,0 +1,51 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+      The harness service declares foregroundServiceType="specialUse" (it hosts a
+      long-lived agent, which matches no other category). From API 34 that type
+      requires its own permission; without it startForeground throws
+      SecurityException before the runtime ever boots.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="dsh"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/LaunchTheme">
+        <!--
+          SplashActivity is the launcher because MainActivity cannot be: the
+          Flutter engine loads inside FlutterActivity.onCreate, so a 16 KB page
+          kernel kills the process before any of our code gets a chance to
+          explain why. See SplashActivity's KDoc.
+        -->
+        <activity
+            android:name=".SplashActivity"
+            android:exported="true"
+            android:theme="@style/LaunchTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/LaunchTheme">
+            <!-- No intent-filter here: a component with one must be exported, and
+                 MainActivity is reachable only from SplashActivity via an explicit
+                 Intent. Declaring the LAUNCHER filter here too would create a
+                 second launcher icon that bypasses the page-size check. -->
+            <meta-data
+                android:name="flutterEmbedding"
+                android:value="2" />
+        </activity>
+    </application>
+</manifest>

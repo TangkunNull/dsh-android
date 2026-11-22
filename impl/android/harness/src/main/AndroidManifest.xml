@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+          A dedicated process, not a thread. node's event loop is process-global,
+          libnode cannot be restarted in-process, and fd 1 is redirected for
+          output capture — all three are per-process concerns. A node crash then
+          costs the harness process, not the UI.
+        -->
+        <!--
+          `specialUse` is mandatory here, not decorative: targetSdk is 35, and
+          from API 34 a foreground service started by such an app WITHOUT a
+          declared type throws MissingForegroundServiceTypeException — the
+          service never comes up and the whole app is dead weight.
+
+          Why specialUse rather than dataSync/shortService: this service hosts a
+          local LLM agent that must stay alive for the entire session (minutes
+          to hours) and syncs nothing to any server — `dataSync` would be a false
+          declaration and `shortService` is capped at a few minutes. The subtype
+          property is what Play review reads to decide whether the use is
+          legitimate; STATE_NOT_APPLICABLE keeps it set across restarts.
+
+          The Kotlin side must pass the matching type constant to
+          startForeground on API 34+ — the two move together (see
+          HarnessService.goForeground).
+        -->
+        <service
+            android:name=".HarnessService"
+            android:exported="false"
+            android:process=":harness"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="on-device coding agent runtime: runs a local Node.js harness that answers the user's requests without any server-side processing" />
+        </service>
+    </application>
+
+</manifest>

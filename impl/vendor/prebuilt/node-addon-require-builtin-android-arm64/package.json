@@ -1,0 +1,33 @@
+{
+  "name": "node-addon-require-builtin-android-arm64",
+  "version": "0.1.9",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepseek-ai/dsh-node-addon-require-builtin.git",
+    "directory": "packages/require-builtin/android-arm64"
+  },
+  "description": "Prebuilt android-arm64 native addon package for node-addon-require-builtin (cross-compiled with NDK for the dsh Android port; not an upstream artifact).",
+  "main": "./index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "android"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "prebuilds.json",
+    "prebuilt/"
+  ],
+  "dependencies": {
+    "node-addon-native-custom-loader": "0.1.9"
+  },
+  "license": "MIT"
+}

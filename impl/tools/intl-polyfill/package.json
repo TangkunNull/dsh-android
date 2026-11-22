@@ -1,0 +1,7 @@
+{
+  "name": "dsh-intl-polyfill-build",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "把 formatjs 的 Intl polyfill 打成单文件，注入 Android runtime。设备上的 libnode 是 --with-intl=none 构建，globalThis.Intl 不存在。"
+}

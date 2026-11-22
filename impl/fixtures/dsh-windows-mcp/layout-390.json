@@ -1,0 +1,439 @@
+{
+  "conversation.input.left": {
+    "id": "n10",
+    "t": "box",
+    "cls": "dwmc-host",
+    "box": [
+      0,
+      0,
+      24,
+      28
+    ],
+    "contents": true,
+    "children": [
+      {
+        "id": "n9",
+        "t": "box",
+        "cls": "dwmc-pill",
+        "box": [
+          0,
+          0,
+          24,
+          28
+        ],
+        "style": {
+          "radius": "var(--dsw-radius-sm)",
+          "bg": {
+            "raw": "transparent"
+          },
+          "fg": {
+            "token": "--dsw-alias-label-secondary"
+          },
+          "cursor": "pointer",
+          "transition": "none"
+        },
+        "children": [
+          {
+            "id": "n1",
+            "t": "text",
+            "cls": "dwmc-dot",
+            "box": [
+              9,
+              0,
+              6,
+              6
+            ],
+            "style": {
+              "radius": 999,
+              "bg": {
+                "token": "--dsw-alias-state-idle-primary"
+              },
+              "transition": "none"
+            },
+            "__abs": [
+              9,
+              0,
+              6,
+              6
+            ]
+          },
+          {
+            "id": "n6",
+            "t": "icon",
+            "cls": "dwmc-icon",
+            "box": [
+              5,
+              12,
+              14,
+              14
+            ],
+            "__abs": [
+              5,
+              12,
+              14,
+              14
+            ]
+          },
+          {
+            "id": "n8",
+            "t": "text",
+            "cls": "dwmc-label",
+            "box": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "text": "AI 控制电脑",
+            "__abs": [
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        ]
+      }
+    ],
+    "__abs": [
+      0,
+      0,
+      24,
+      28
+    ]
+  },
+  "plugins.bundle.config": {
+    "id": "n17",
+    "t": "box",
+    "cls": "dwmc-panel",
+    "box": [
+      0,
+      0,
+      261,
+      63
+    ],
+    "style": {
+      "fg": {
+        "token": "--dsw-alias-label-primary"
+      }
+    },
+    "children": [
+      {
+        "id": "n14",
+        "t": "box",
+        "cls": "dwmc-panel__head",
+        "box": [
+          0,
+          0,
+          261,
+          35
+        ],
+        "children": [
+          {
+            "id": "n11",
+            "t": "text",
+            "cls": "dwmc-dot",
+            "box": [
+              127,
+              0,
+              6,
+              6
+            ],
+            "style": {
+              "radius": 999,
+              "bg": {
+                "token": "--dsw-alias-state-idle-primary"
+              },
+              "transition": "none"
+            },
+            "__abs": [
+              127,
+              0,
+              6,
+              6
+            ]
+          },
+          {
+            "id": "n13",
+            "t": "text",
+            "box": [
+              10,
+              14,
+              241,
+              21
+            ],
+            "text": "Windows 桌面自动化（Windows-MCP）",
+            "__abs": [
+              10,
+              14,
+              241,
+              21
+            ]
+          }
+        ],
+        "__abs": [
+          0,
+          0,
+          261,
+          35
+        ]
+      },
+      {
+        "id": "n16",
+        "t": "text",
+        "cls": "dwmc-note",
+        "box": [
+          0,
+          45,
+          261,
+          18
+        ],
+        "text": "安装、更新和回退都在 设置 → 桌面控制 里管理。",
+        "style": {
+          "fg": {
+            "token": "--dsw-alias-label-secondary"
+          }
+        },
+        "__abs": [
+          0,
+          45,
+          261,
+          18
+        ]
+      }
+    ],
+    "__abs": [
+      0,
+      0,
+      261,
+      63
+    ]
+  },
+  "plugins.bundle.activation": {
+    "id": "n29",
+    "t": "box",
+    "cls": "dwmc-panel",
+    "box": [
+      0,
+      0,
+      390,
+      155
+    ],
+    "style": {
+      "fg": {
+        "token": "--dsw-alias-label-primary"
+      }
+    },
+    "children": [
+      {
+        "id": "n21",
+        "t": "box",
+        "cls": "dwmc-panel__head",
+        "box": [
+          0,
+          0,
+          390,
+          35
+        ],
+        "children": [
+          {
+            "id": "n18",
+            "t": "text",
+            "cls": "dwmc-dot",
+            "box": [
+              192,
+              0,
+              6,
+              6
+            ],
+            "style": {
+              "radius": 999,
+              "bg": {
+                "token": "--dsw-alias-state-idle-primary"
+              },
+              "transition": "none"
+            },
+            "__abs": [
+              192,
+              0,
+              6,
+              6
+            ]
+          },
+          {
+            "id": "n20",
+            "t": "text",
+            "box": [
+              74,
+              14,
+              242,
+              21
+            ],
+            "text": "Windows 桌面自动化（Windows-MCP）",
+            "__abs": [
+              74,
+              14,
+              242,
+              21
+            ]
+          }
+        ],
+        "__abs": [
+          0,
+          0,
+          390,
+          35
+        ]
+      },
+      {
+        "id": "n23",
+        "t": "text",
+        "cls": "dwmc-note",
+        "box": [
+          0,
+          45,
+          390,
+          36
+        ],
+        "text": "首次约 60 MB，一次即可；安装完成后会自动把桥指向它，重启 DSH 生效。",
+        "style": {
+          "fg": {
+            "token": "--dsw-alias-label-secondary"
+          }
+        },
+        "__abs": [
+          0,
+          45,
+          390,
+          36
+        ]
+      },
+      {
+        "id": "n28",
+        "t": "box",
+        "cls": "dwmc-actions",
+        "box": [
+          0,
+          91,
+          390,
+          64
+        ],
+        "children": [
+          {
+            "id": "n25",
+            "t": "box",
+            "cls": "dwmc-btn dwmc-btn--quiet",
+            "box": [
+              6,
+              91,
+              72,
+              28
+            ],
+            "text": "检查更新",
+            "style": {
+              "cursor": "not-allowed",
+              "radius": 8,
+              "borderWidth": 1,
+              "bg": {
+                "raw": "transparent"
+              },
+              "fg": {
+                "token": "--dsw-alias-label-secondary"
+              },
+              "shadow": "inset 0 0 0 1px var(--dsw-alias-border-l1)",
+              "opacity": 0.55
+            },
+            "__abs": [
+              6,
+              91,
+              72,
+              28
+            ]
+          },
+          {
+            "id": "n27",
+            "t": "box",
+            "cls": "dwmc-btn",
+            "box": [
+              0,
+              127,
+              84,
+              28
+            ],
+            "text": "下载并安装",
+            "style": {
+              "cursor": "not-allowed",
+              "radius": 8,
+              "borderWidth": 1,
+              "bg": {
+                "raw": "transparent"
+              },
+              "fg": {
+                "token": "--dsw-alias-brand-primary"
+              },
+              "shadow": "inset 0 0 0 1px color-mix(in srgb,var(--dsw-alias-brand-primary) 42%,transparent)",
+              "opacity": 0.55
+            },
+            "__abs": [
+              0,
+              127,
+              84,
+              28
+            ]
+          }
+        ],
+        "__abs": [
+          0,
+          91,
+          390,
+          64
+        ]
+      }
+    ],
+    "__abs": [
+      0,
+      0,
+      390,
+      155
+    ]
+  },
+  "settings.section.icon": {
+    "id": "n33",
+    "t": "icon",
+    "box": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "__abs": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "settings.section": {
+    "id": "n35",
+    "t": "text",
+    "cls": "dwmc-note",
+    "box": [
+      0,
+      0,
+      56,
+      18
+    ],
+    "text": "正在测速…",
+    "style": {
+      "fg": {
+        "token": "--dsw-alias-label-secondary"
+      }
+    },
+    "__abs": [
+      0,
+      0,
+      56,
+      18
+    ]
+  }
+}

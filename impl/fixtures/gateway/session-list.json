@@ -1,0 +1,57 @@
+{
+  "items": [
+    {
+      "sessionId": "session-1e06db63-7460-42ce-bac4-ac9b6f9c23b6",
+      "updatedAt": 1794996329660,
+      "agentAvailable": true,
+      "formatStatus": "current",
+      "running": false,
+      "blank": true,
+      "cwd": "/tmp/probe-ws",
+      "projections": {
+        "kind": "sequenced",
+        "asOfSeq": 2,
+        "values": {
+          "userQuestions": {
+            "active": [],
+            "settled": []
+          },
+          "tokenUsage": {
+            "uncachedInputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0
+          },
+          "title": null,
+          "agentPreset": "standard",
+          "goal": null,
+          "modelSelection": {
+            "lastUsed": null,
+            "next": null
+          },
+          "workingDirectory": "/tmp/probe-ws",
+          "inbox": {
+            "next-turn": [],
+            "next-step": []
+          },
+          "permissions": {
+            "currentValue": "workspace-write"
+          },
+          "subagentCatalog": [],
+          "subagentTiming": {
+            "settledMs": 0
+          },
+          "subagent": null,
+          "plan": {
+            "active": false,
+            "pending": false
+          },
+          "sessionListMetadata": {
+            "blank": true,
+            "lastPromptAt": null
+          }
+        }
+      }
+    }
+  ]
+}

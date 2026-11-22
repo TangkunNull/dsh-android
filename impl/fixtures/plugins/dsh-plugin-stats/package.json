@@ -1,0 +1,17 @@
+{
+  "name": "dsh-plugin-stats",
+  "version": "0.1.1",
+  "description": "General usage stats for DeepSeek Harness: throughput, tokens, cost, tool calls, and activity — charted in the Web UI. TypeScript superset of dsh-plugin-tokspeed.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "entry": "dist/client.js",
+  "source": "https://unpkg.com/dsh-plugin-stats@0.1.1/dist/client.js"
+}

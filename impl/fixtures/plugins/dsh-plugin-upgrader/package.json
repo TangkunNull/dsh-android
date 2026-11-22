@@ -1,0 +1,23 @@
+{
+  "name": "dsh-plugin-upgrader",
+  "version": "1.8.2",
+  "description": "DSH plugin for DeepSeek Harness: upgrade plugins from the Plugins page, version history, rollback, live pnpm progress. The dsh-plugin upgrader replaces a plugin in place, no uninstall, enabled state preserved.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.1-rc.5": "compatible"
+      }
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-upgrader@1.8.2/lib/client.js"
+}

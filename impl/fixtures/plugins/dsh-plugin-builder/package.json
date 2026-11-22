@@ -1,0 +1,21 @@
+{
+  "name": "dsh-plugin-builder",
+  "version": "0.2.3",
+  "description": "Guardrailed DSH plugin-development skill bundle: ships the cordis-plugin-development skill, a settings tab that drafts plugin prompts for the agent, and the scaffolding/validation toolkit the skill calls.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-builder@0.2.3/lib/client.js"
+}

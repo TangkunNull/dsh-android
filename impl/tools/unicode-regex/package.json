@@ -1,0 +1,11 @@
+{
+  "name": "dsh-unicode-regex-transpiler",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "把 runtime 里 \\p{...} Unicode 属性转义转译成显式字符类：Android 版 libnode 是 --with-intl=none 构建，V8 不认 \\p{...}",
+  "dependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/plugin-transform-unicode-property-regex": "^7.25.9"
+  }
+}

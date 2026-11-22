@@ -1,0 +1,39 @@
+// Build script shared by the Flutter app.
+//
+// Plugin versions are pinned rather than resolved: Flutter 3.0's gradle plugin
+// reaches into `applicationVariants`, which AGP 8 removed, so the ceiling here
+// is AGP 7.4.x. Bumping one without the other produces "Cannot query the value
+// of extension property 'applicationVariants'" — a message that says nothing
+// about Flutter.
+buildscript {
+    ext.kotlin_version = '1.7.10'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = '../build'
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+
+// Note: the stock Flutter template adds `subprojects { evaluationDependsOn(':app') }`
+// here. It is omitted on purpose — `:app` depends on `:harness`/`:runtime`, and
+// forcing every module to wait for `:app` to finish evaluating deadlocks that
+// dependency in both directions.
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}

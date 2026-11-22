@@ -1,0 +1,66 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'ai.dsh.probe'
+    compileSdk 35
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'ai.dsh.probe'
+        // HarmonyOS 3 spans Android 9-12 bases (the low end sits on Android 10 /
+        // API 29), so minSdk 28 covers them all.
+        minSdk 28
+        targetSdk 35
+        versionCode 11
+        versionName '0.1.15'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Uncompressed native libs are extracted at install time, which is
+            // the only way a prebuilt .so with its own page alignment survives.
+            packagingOptions {
+                jniLibs {
+                    useLegacyPackaging = true
+                }
+            }
+        }
+        release {
+            minifyEnabled false
+            // Local distribution: sign with the debug key, else the APK is
+            // unsigned and not installable.
+            signingConfig signingConfigs.debug
+            packagingOptions {
+                jniLibs {
+                    useLegacyPackaging = true
+                }
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    // runtime.zip 已经是压缩包（deflate 过一遍），aapt 再压一遍既不会变小，还要
+    // 让解压方每读一块都过一层 inflate。Stored 之后 AssetManager 可以按段直读，
+    // 28 MB 的包在 16k 次 entry 的读取上省掉一整层解压。
+    androidResources {
+        noCompress 'zip'
+    }
+}
+
+dependencies {
+    implementation project(':runtime')
+    implementation project(':harness')
+}

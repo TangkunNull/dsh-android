@@ -1,0 +1,112 @@
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader -> localProperties.load(reader) }
+}
+
+def flutterRoot = localProperties.getProperty('flutter.sdk')
+if (flutterRoot == null) {
+    throw new GradleException("Flutter SDK not found. Add flutter.sdk to local.properties.")
+}
+
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
+
+android {
+    namespace 'ai.dsh.app'
+    // Must match the `:harness` / `:runtime` library modules. Those are compiled
+    // against API 34 symbols (FOREGROUND_SERVICE_TYPE_SPECIAL_USE and the
+    // three-argument startForeground), and a library built at a newer compileSdk
+    // than its consumer fails to link. AGP 7.4.2 prints "tested up to 33" but
+    // compiles 35 fine — verified by `:harness:compileDebugKotlin` and a full
+    // `:app:assembleDebug`.
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'ai.dsh.app'
+        // HarmonyOS compat (single trunk, minSdk 28 = Android 9): HarmonyOS does NOT have one AOSP
+        // base — flagships sit on Android 12, but older devices keep whatever
+        // they shipped with (9/10/11). The low end sits on an Android 10 (API 29)
+        // base, so minSdk 30 refused to install there. 28 covers
+        // every HarmonyOS 2/3 device; anything below that never got HarmonyOS.
+        minSdk 28        // targetSdk 34+ makes the foreground service type mandatory: without it
+        // startForeground throws MissingForegroundServiceTypeException on any
+        // Android 14 device, which is every device this can install on.
+        targetSdk 35
+        // versionName 由 Flutter 从 pubspec 的 `version:` 注入到
+        // local.properties（flutter.versionName），这里读它；**不能**写死
+        // 字符串 —— 写死后 AGP 会用显式值盖掉 Flutter 的注入，结果是
+        // pubspec 改了版本、APK 里还是旧的（0.1.5 那版装完仍显示 0.1.0
+        // 就是这么来的）。versionCode 单调递增（probe 已用到 8）。
+        versionCode 10
+        versionName localProperties.getProperty('flutter.versionName') ?: '0.0.0'
+        ndk {
+            // The prebuilt libnode.so only exists for arm64. Shipping an empty
+            // x86_64 slice yields an APK that installs and then dies inside
+            // System.loadLibrary on an emulator nobody tested on.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // runtime.zip is already deflated once; letting AAPT deflate it again burns
+    // CPU on every install and buys nothing (measured: 29.9 MB either way).
+    // Stored also keeps `unzip -l` honest about what actually ships.
+    aaptOptions {
+        noCompress 'zip'
+    }
+
+    buildTypes {
+        debug {
+            // libnode.so is prebuilt and already 16 KB aligned. Legacy packaging
+            // keeps it as an extracted file instead of mapping it out of the APK,
+            // which is the only layout the alignment guarantee applies to.
+            packagingOptions {
+                jniLibs.useLegacyPackaging = true
+                // librg.so 不是我们编译的库，是一个**静态链接的可执行文件**
+                // （ripgrep，工具链不认识它的段布局）。AGP 默认会对 jniLibs 跑
+                // llvm-strip，在一个 ET_EXEC 静态镜像上删段的结果没人保证 ——
+                // 而这里的失败形态是「真机搜索时 execve 后立刻 SIGSEGV」，
+                // 不是构建报错。所以整份保留，字节不动。
+                jniLibs.keepDebugSymbols += '**/librg.so'
+            }
+        }
+        release {
+            minifyEnabled false
+            // No remote signing infra: local distribution signs with the debug
+            // key. An unsigned release APK is not installable on any device.
+            signingConfig signingConfigs.debug
+            // Flutter's release pipeline turns on resource shrinking; AGP refuses
+            // that combination unless code shrinking is on too, and R8 on a
+            // Flutter engine build is a separate project. Explicit false wins
+            // over the plugin's default.
+            shrinkResources false
+            packagingOptions {
+                jniLibs.useLegacyPackaging = true
+                // librg.so 不是我们编译的库，是一个**静态链接的可执行文件**
+                // （ripgrep，工具链不认识它的段布局）。AGP 默认会对 jniLibs 跑
+                // llvm-strip，在一个 ET_EXEC 静态镜像上删段的结果没人保证 ——
+                // 而这里的失败形态是「真机搜索时 execve 后立刻 SIGSEGV」，
+                // 不是构建报错。所以整份保留，字节不动。
+                jniLibs.keepDebugSymbols += '**/librg.so'
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+flutter {
+    source '../..'
+}
+
+dependencies {
+    implementation project(':runtime')
+    implementation project(':harness')
+}

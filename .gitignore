@@ -1,0 +1,33 @@
+# 构建产物，不入库
+impl/app/build/
+impl/android/*/build/
+impl/app/.dart_tool/
+impl/app/.packages
+out/*.apk
+
+# 本地 SDK 路径（每台机器不同）
+impl/app/android/local.properties
+impl/android/local.properties
+
+# Gradle / 依赖
+.gradle/
+impl/node_modules/
+
+# 打包期转译依赖（20 MB / 2445 文件）：有 package-lock.json，`npm ci` 可完全还原，
+# 不入库。注意不能用全局 `node_modules/` —— impl/android/profile/node_modules 里那
+# 2 个文件是 runtime-manifest 的**输入夹具**，不是依赖安装结果，必须保留。
+impl/tools/unicode-regex/node_modules/
+
+# 运行时包：约 30 MB 的二进制产物，由 impl/tools/pack-runtime.mjs 从
+# runtime-manifest.json + 源码 node_modules 重建，不必入库。它到底装的是哪一版，
+# 由 zip 内 runtime.json 的 buildId（内容指纹）回答，仓库里存清单就够。
+impl/android/harness/src/main/assets/runtime.zip
+
+# 打包报告：每次构建都会变，属于本地产物
+impl/.artifacts/
+impl/core.*
+impl/android/*/.cxx/
+impl/android/build/
+
+# 本机 agent 约定：个人工作文件，只在本机生效，不入库
+/AGENTS.md

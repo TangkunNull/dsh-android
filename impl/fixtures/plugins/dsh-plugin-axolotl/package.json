@@ -1,0 +1,17 @@
+{
+  "name": "dsh-plugin-axolotl",
+  "version": "0.2.2",
+  "description": "DSH plugin for the Axolotl Launcher (美西螈启动器): the launcher's 269 MCP tools folded into 9 domain tools plus status and raw, control-session lifetime handled for you, screenshots returned as real images",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  },
+  "source": "https://unpkg.com/dsh-plugin-axolotl@0.2.2/lib/client.js"
+}

@@ -1,0 +1,28 @@
+// Gradle settings for the Flutter shell.
+//
+// This file is the Gradle *root* for the app, and it deliberately includes two
+// modules that live outside this directory (`impl/android/runtime`, `:harness`).
+// They are shared with the standalone probe app: the runtime module owns the
+// libnode JNI pair, the harness module owns the Service that runs it. Duplicating
+// either would mean two copies of a 69 MB .so.
+//
+// Kept on the legacy settings form (not `pluginManagement { includeBuild }`)
+// because Flutter 3.0's gradle plugin predates the declarative plugin DSL.
+
+include ':app'
+include ':harness'
+include ':runtime'
+
+project(':harness').projectDir = new File(settingsDir, '../../android/harness')
+project(':runtime').projectDir = new File(settingsDir, '../../android/runtime')
+
+def localPropertiesFile = new File(rootProject.projectDir, "local.properties")
+def properties = new Properties()
+assert localPropertiesFile.exists(), "local.properties is missing (flutter.sdk)"
+localPropertiesFile.withReader("UTF-8") { reader -> properties.load(reader) }
+def flutterSdkPath = properties.getProperty("flutter.sdk")
+assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+
+apply from: "$flutterSdkPath/packages/flutter_tools/gradle/app_plugin_loader.gradle"
+
+rootProject.name = "dsh_native"

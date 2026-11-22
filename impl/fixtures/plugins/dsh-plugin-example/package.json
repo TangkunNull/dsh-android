@@ -1,0 +1,18 @@
+{
+  "name": "dsh-plugin-example",
+  "version": "0.1.5",
+  "description": "A 70-line DeepSeek Harness plugin: one sidebar tab, one button, one test.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-example@0.1.5/client.js"
+}

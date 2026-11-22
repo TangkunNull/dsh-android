@@ -1,0 +1,14 @@
+{
+  "name": "dsh-plugin-memory",
+  "version": "0.20.0",
+  "description": "Long-term memory plugin for DeepSeek Harness: persistent cross-session markdown memory with a soul/persona file, auto-injected at every session start, plus remember/recall/consolidate/forget workflows and portable migration tooling.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-memory@0.20.0/lib/client.js"
+}

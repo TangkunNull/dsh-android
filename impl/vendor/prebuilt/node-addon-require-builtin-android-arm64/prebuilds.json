@@ -1,0 +1,12 @@
+{
+  "platform": "android-arm64",
+  "binaries": [
+    {
+      "backend": "napi",
+      "abi": "napi-v9",
+      "binaryTag": "napi-v9",
+      "node": ">=20",
+      "path": "prebuilt/android-arm64-napi-v9.node"
+    }
+  ]
+}

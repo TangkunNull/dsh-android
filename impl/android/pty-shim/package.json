@@ -1,0 +1,8 @@
+{
+  "name": "node-pty",
+  "version": "1.0.0-dsh.1",
+  "private": true,
+  "description": "DSH 的 node-pty 替代：同一套接口，底下是 libdsh_pty.so（forkpty + uv_poll）",
+  "main": "index.js",
+  "license": "MIT"
+}

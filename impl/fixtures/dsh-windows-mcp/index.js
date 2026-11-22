@@ -1,0 +1,1465 @@
+/**
+ * dsh-windows-mcp — 宿主半边 / host half.
+ *
+ * What this file is for
+ * ---------------------
+ * The actual integration is declarative: `cordis.patch.yml` mounts the official
+ * in-box MCP client bridge (`@deepseek-ai/dsh-mcp-client`) against
+ * CursorTouch/Windows-MCP. Everything the model can *do* therefore comes from
+ * that bridge — this package ships no tools of its own but ONE diagnostic tool,
+ * `windows_mcp_doctor`, which answers the only question a carrier bundle can
+ * usefully answer: "why are the `mcp__windows__*` tools missing or failing?"
+ *
+ * Disciplines (same three every healthy DSH plugin follows)
+ * --------------------------------------------------------
+ *   1. `apply()` never throws — a synchronous throw fails this loader entry's
+ *      fiber and the boot audit reports "Failed to load plugins".
+ *   2. Only inject services that are certainly provided. Here: `tools`, which
+ *      every profile has. Injecting a service nobody provides leaves the fiber
+ *      PENDING and drags the whole plugin tree.
+ *   3. No log noise. A working plugin logs nothing; anything worth logging is
+ *      logged once, at warn level, together with what to do about it.
+ *
+ * Zero runtime dependencies: this module only uses `node:*` builtins, because
+ * third-party DSH plugins cannot import `@deepseek-ai/*` (everything official
+ * lives inside `app.asar`).
+ */
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  BRIDGE_ROUTE,
+  PREPARE_CANCEL_ROUTE,
+  PREPARE_ROUTE,
+  dependencySnapshot,
+  windowsMcpExecutable,
+  windowsMcpVersionPin,
+  writeBridgeOverride,
+} from "./dependency.js";
+import { UPDATE_ACTIONS, UPDATE_ROUTE, createUpdater, updateAvailability } from "./updater.js";
+import { UPSTREAM_UIA_ISSUE, describeProbe, probeDesktop } from "./desktop-probe.js";
+import {
+  SETTINGS_ROUTE,
+  bridgeSettingsMatch,
+  bridgeSettingsOf,
+  normalizeSettings,
+  readBridgeSettings,
+  readSettings,
+  writeSettings,
+  defaultSettings,
+} from "./settings.js";
+
+const PACKAGE_ID = "dsh-windows-mcp";
+const BRIDGE_ROW_ID = "windows-mcp-bridge";
+const TOOL_NAME = "windows_mcp_doctor";
+/** Every bridged tool is `mcp__<serverName>__<UpstreamToolName>`. */
+const BRIDGE_TOOL_PREFIX = "mcp__windows__";
+/**
+ * The one-line entry the model sees while the desktop capabilities are still
+ * hidden. Calling it reveals picked capabilities (or all of them) for that
+ * session; four tokens of description are much cheaper than eighteen schemas.
+ */
+const REVEAL_TOOL_NAME = "windows_desktop";
+const REVEAL_TOOL_DESCRIPTION =
+  "Reveal the Windows desktop capabilities (screenshots, clicking, typing, windows, clipboard, processes) for this session. Call it with no arguments to reveal all of them; the definitions come back in the result and the tools become callable on the next step.";
+
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+const patchPath = join(packageRoot, "cordis.patch.yml");
+const windowsMcpHome = join(homedir(), ".windows-mcp");
+
+/** DSH home: `$DSH_HOME`, else `~/.dsh`. The settings file lives here. */
+const stateDirectory = (() => {
+  const fromEnvironment = String(process.env.DSH_HOME ?? "").trim();
+  return fromEnvironment === "" ? join(homedir(), ".dsh") : fromEnvironment;
+})();
+const STATE_ROUTE = "/dsh-windows-mcp/state";
+const MAX_STATE_BODY_BYTES = 1024;
+const MAX_SETTINGS_BODY_BYTES = 8192;
+/** Upper bound on remembered decisions; see `rememberGrant()`. */
+const MAX_GRANT_ENTRIES = 256;
+
+/**
+ * Computer Use grants, one per session.
+ *
+ * The switch belongs to the conversation that flipped it. Granting the desktop
+ * in one window must not hand it to another, and revoking it in one must not
+ * blind a second window that is halfway through a task — which is exactly what
+ * a single host-wide flag did.
+ *
+ * Nothing is persisted. Desktop control is an opt-in *per conversation*, and a
+ * file any process (including a model with shell access) can write is the wrong
+ * place for a grant: the old `dsh-windows-mcp.state.json` let a write before
+ * boot decide the next session's posture. In memory, a grant dies with its
+ * session and with the process, so every restart starts blind again.
+ *
+ * A `false` entry is meaningful: it is how a session revokes what its lineage
+ * granted. Sessions without an entry inherit from their subagent ancestors
+ * (`grantChainOf`); a session whose whole lineage is silent starts blind.
+ * @type {Map<string, boolean>}
+ */
+const sessionGrants = new Map();
+
+/** User settings; read once at boot, replaced by the settings route. */
+let settings = null;
+
+/** Recomputes the per-agent tool restriction; installed by registerToolGate(). */
+let reapplyToolGate = null;
+
+/** The Windows-MCP version manager, created in apply() once the logger exists. */
+let updater = null;
+
+/* ------------------------------------------------------------------ *
+ * lazy desktop tools
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which desktop capabilities the model has asked for, per agent. The prompt
+ * filter hides the rest and the dispatch guard refuses them, so "hidden" is a
+ * gate rather than a hint. A WeakMap ties the answer to the live agent: a new
+ * session starts from the one-line entry again.
+ * @type {WeakMap<object, { all: boolean, names: Set<string> }>}
+ */
+const revealedTools = new WeakMap();
+/** Fallback for callers that hand us no agent (tests, odd compositions). */
+const revealedAnonymously = { all: false, names: new Set() };
+
+/** @returns the reveal state for one agent. */
+function revealStateFor(agent) {
+  if (agent === null || typeof agent !== "object") return revealedAnonymously;
+  let state = revealedTools.get(agent);
+  if (state === undefined) {
+    state = { all: false, names: new Set() };
+    revealedTools.set(agent, state);
+  }
+  return state;
+}
+
+/** Lazy exposure is on unless the settings page turned it off. */
+function lazyToolsEnabled() {
+  return settings === null || settings.plugin === undefined || settings.plugin.lazyTools !== false;
+}
+
+/**
+ * What a session that has never touched the composer pill starts with. The pill
+ * always wins per session; this is the fallback the settings page owns, and it
+ * ships off so a fresh install grants the desktop to nobody by accident.
+ */
+function defaultGrantEnabled() {
+  return settings !== null && settings.plugin !== undefined && settings.plugin.defaultGrant === true;
+}
+
+/** True when the model may see and call one bridged tool. */
+function isToolRevealed(agent, name) {
+  if (!lazyToolsEnabled()) return true;
+  const state = revealStateFor(agent);
+  return state.all || state.names.has(name);
+}
+
+/**
+ * The capability list handed back by the reveal tool.
+ * The tool runtime owns the schema shape, so both published shapes are probed
+ * and a miss simply omits the definition dump from the result.
+ * @returns `[{ name, description, parameters }]`.
+ */
+function desktopCatalog(tools) {
+  try {
+    if (typeof tools?.schemas !== "function") return [];
+    const schemas = tools.schemas();
+    if (!Array.isArray(schemas)) return [];
+    const entries = [];
+    for (const schema of schemas) {
+      const name = Array.isArray(schema) ? schema[0] : schema?.name;
+      if (!isBridgedToolName(name)) continue;
+      const description = Array.isArray(schema) ? "" : typeof schema?.description === "string" ? schema.description : "";
+      const parameters = Array.isArray(schema) ? null : (schema?.parameters ?? schema?.parameterSchema ?? null);
+      entries.push({ name, description, parameters });
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * small, throw-proof helpers
+ * ------------------------------------------------------------------ */
+
+/** Read a UTF-8 file, or null. Never throws. */
+function readText(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Parse JSON from a file, or null. Never throws. */
+function readJson(path) {
+  const text = readText(path);
+  if (text === null) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** This package's declared version, or "unknown". */
+function selfVersion() {
+  const manifest = readJson(join(packageRoot, "package.json"));
+  return typeof manifest?.version === "string" ? manifest.version : "unknown";
+}
+
+/** PATH entries (de-quoted) plus the `uv tool` shim directory. */
+function searchDirectories() {
+  const entries = String(process.env.PATH ?? "")
+    .split(delimiter)
+    .map((entry) => entry.replace(/^"|"$/gu, "").trim())
+    .filter(Boolean);
+  // `uv tool install` and `uvx` both publish shims here, and a GUI-launched
+  // DSH does not always have it on PATH.
+  entries.unshift(join(homedir(), ".local", "bin"));
+  return entries;
+}
+
+/** Executable suffixes to try on this platform. */
+function executableSuffixes() {
+  if (process.platform !== "win32") return [""];
+  const raw = process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD";
+  return raw
+    .split(";")
+    .map((suffix) => suffix.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Resolve an executable the way a shell would (PATH + PATHEXT).
+ * @returns Absolute path, or null when nothing matches.
+ */
+function which(name) {
+  const suffixes = executableSuffixes();
+  for (const directory of searchDirectories()) {
+    for (const suffix of suffixes) {
+      const candidate = join(directory, `${name}${suffix}`);
+      try {
+        if (existsSync(candidate)) return candidate;
+      } catch {
+        /* keep looking */
+      }
+    }
+  }
+  return null;
+}
+
+/** `stat` summary for a path, or null. */
+function describeFile(path) {
+  try {
+    if (!existsSync(path)) return null;
+    const info = statSync(path);
+    return { path, bytes: info.size, modified: info.mtime.toISOString() };
+  } catch {
+    return null;
+  }
+}
+
+/** The `windows-mcp-bridge` block of our patch file, verbatim. */
+function bridgeBlock() {
+  const text = readText(patchPath);
+  if (text === null) return null;
+  const lines = text.split(/\r?\n/u);
+  const start = lines.findIndex((line) => line.includes(BRIDGE_ROW_ID));
+  if (start < 0) return null;
+  const block = [];
+  for (let index = start; index < lines.length && block.length < 60; index += 1) {
+    const line = lines[index];
+    const indent = line.search(/\S/u);
+    if (index > start && indent >= 0 && indent <= 4 && /^\s*-\s+(?:id|insert):/u.test(line)) break;
+    block.push(line);
+  }
+  return block.join("\n").trimEnd();
+}
+
+/**
+ * Names of registered tools, when the tool runtime exposes them.
+ * The listing API is host-owned and may change: every shape is probed inside
+ * try/catch and a miss simply omits this section from the report.
+ * @returns `{ total, bridged }` or null.
+ */
+function toolInventory(tools) {
+  try {
+    if (typeof tools?.schemas !== "function") return null;
+    const schemas = tools.schemas();
+    if (!Array.isArray(schemas)) return null;
+    const names = schemas
+      .map((entry) => (Array.isArray(entry) ? entry[0] : entry?.name))
+      .filter((name) => typeof name === "string");
+    return { total: names.length, bridged: names.filter(isBridgedToolName).sort() };
+  } catch {
+    return null;
+  }
+}
+
+/** Which session a bridged tool call belongs to, or null when the host named none. */
+function sessionIdOf(agent) {
+  const session = agent?.session;
+  if (session !== null && session !== undefined && typeof session.id === "string") return session.id;
+  // Odd compositions — and the test doubles — hand over a bare agent whose id
+  // *is* its session id (`Agent.id === Agent.session.id` in this host).
+  return typeof agent?.id === "string" ? agent.id : null;
+}
+
+/**
+ * Resolve a session id to its live session, through the host's session store
+ * when this composition exposes one. The resolver never throws and answers
+ * `null` when the store is absent, which only costs a subagent its inheritance —
+ * it fails closed (blind), never open.
+ */
+function sessionLookup(ctx) {
+  let store = null;
+  try {
+    store = typeof ctx?.get === "function" ? ctx.get("sessions") : undefined;
+  } catch {
+    store = null;
+  }
+  if (store === null || store === undefined || typeof store.get !== "function") return () => null;
+  return (sessionId) => {
+    try {
+      return store.get(sessionId) ?? null;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * A session followed by the subagent ancestors whose grant it inherits, nearest
+ * first. A *forked* or resumed user session carries `parentSession` too, but it
+ * is a new conversation a human drives, so it starts from scratch: only
+ * `origin === "subagent"` inherits, the lineage rule `@deepseek-ai/dsh-subagent`
+ * itself applies.
+ */
+function grantChainOf(session, lookup) {
+  const chain = [];
+  let current = session;
+  for (let depth = 0; depth < 8 && current !== null && current !== undefined; depth += 1) {
+    chain.push(current);
+    const header = current.header;
+    if (header?.origin !== "subagent" || typeof header.parentSession !== "string") break;
+    current = lookup(header.parentSession);
+  }
+  return chain;
+}
+
+/**
+ * True when the desktop is granted for this agent's conversation. The nearest
+ * explicit decision wins, so a session can also revoke what its lineage granted
+ * without touching the parent's switch. A conversation whose whole lineage has
+ * never decided falls back to the settings default; a call that names no session
+ * at all is refused, whatever that default says.
+ */
+function grantedFor(agent, lookup) {
+  const session = agent?.session;
+  if (session === null || session === undefined) {
+    const fallback = sessionIdOf(agent);
+    if (fallback === null) return false;
+    const explicit = sessionGrants.get(fallback);
+    return explicit === undefined ? defaultGrantEnabled() : explicit;
+  }
+  for (const candidate of grantChainOf(session, lookup)) {
+    const explicit = sessionGrants.get(candidate.id);
+    if (explicit !== undefined) return explicit;
+  }
+  return defaultGrantEnabled();
+}
+
+/** The grant for one session id, which is what the pill asks the route about. */
+function grantedForSessionId(sessionId, lookup) {
+  if (typeof sessionId !== "string" || sessionId === "") return false;
+  const session = lookup(sessionId);
+  if (session === null || session === undefined) {
+    const explicit = sessionGrants.get(sessionId);
+    return explicit === undefined ? defaultGrantEnabled() : explicit;
+  }
+  return grantedFor({ session }, lookup);
+}
+
+/**
+ * Record one session's decision. Re-inserting keeps the map in
+ * least-recently-written order and the bound keeps a page that mints session ids
+ * from turning the route into a memory amplifier.
+ */
+function rememberGrant(sessionId, enabled) {
+  sessionGrants.delete(sessionId);
+  sessionGrants.set(sessionId, enabled === true);
+  while (sessionGrants.size > MAX_GRANT_ENTRIES) {
+    const oldest = sessionGrants.keys().next().value;
+    if (typeof oldest !== "string") break;
+    sessionGrants.delete(oldest);
+  }
+}
+
+/** How many bridged desktop tools this scope can currently see, or null. */
+function bridgedToolCount(tools) {
+  const inventory = toolInventory(tools);
+  return inventory === null ? null : inventory.bridged.length;
+}
+
+/** True for a tool this package's bridge is responsible for. */
+function isBridgedToolName(name) {
+  return typeof name === "string" && name.startsWith(BRIDGE_TOOL_PREFIX);
+}
+
+/**
+ * Enforce the Computer Use switch, with two mechanisms that fail differently:
+ *
+ *   1. `tools.restrict({ deny })` on each agent's own tool scope keeps the
+ *      bridged schemas out of the model-facing tool list.
+ *   2. `tools.guard()` is a synchronous global veto inside dispatch, so a model
+ *      that remembers the names from history still cannot execute them.
+ *
+ * `system-prompt/assemble` looks like the natural place for (1) and is not:
+ * the assembly object the host hands to that waterfall carries only
+ * `{ sections, contexts, variables }`. `dsh-system-prompt` adds `tools` to the
+ * return value *after* the waterfall resolves, so `assembly.tools` is always
+ * `undefined` there — a filter written against it silently keeps every schema.
+ * That is why a switched-off desktop still offered eighteen `mcp__windows__*`
+ * tools and paid for their schemas on every step.
+ *
+ * `restrict()` needs a scoped context and rejects names that are not registered
+ * yet, so the deny list is recomputed per agent from the tools that exist at
+ * that moment: an empty intersection is a no-op for that step, and the next
+ * step picks up whatever the bridge registered meanwhile.
+ *
+ * The lifecycle events carry the agent as `payload.agent` (the host fuses it
+ * onto every agent event), never as the payload itself. The restriction is also
+ * recomputed the moment the switch, the settings or the reveal state change,
+ * and again whenever the bridge registers tools: a step resolves its tool set
+ * before `agent/pre-step` runs, so waiting for the next step would leak one
+ * request with the stale list.
+ */
+function registerToolGate(ctx, warn) {
+  /** Per-agent restriction handles, so a changed decision can be replaced. */
+  const applied = new Map();
+  /** Agents seen through the lifecycle events, for switch/settings updates. */
+  const live = new Set();
+  /** The global tools service, captured from `ctx.inject` below. */
+  let toolsService = null;
+  /** Session ids → live sessions, for subagent inheritance. Optional. */
+  const lookup = sessionLookup(ctx);
+
+  function serviceOf() {
+    if (toolsService !== null) return toolsService;
+    try {
+      return (typeof ctx?.get === "function" ? ctx.get("tools") : undefined) ?? ctx?.tools ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Tools this agent must not see right now, limited to what is registered. */
+  function denyFor(agent) {
+    let known;
+    try {
+      known = serviceOf()?.schemas?.();
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(known)) return null;
+    // The decision is the conversation's, not the host's: two windows can sit
+    // on opposite sides of the switch at the same time.
+    const granted = grantedFor(agent, lookup);
+    const deny = [];
+    for (const schema of known) {
+      const name = Array.isArray(schema) ? schema[0] : schema?.name;
+      if (typeof name !== "string") continue;
+      if (name === REVEAL_TOOL_NAME) {
+        // The entry itself is dead weight when the desktop is off or when every
+        // schema is always shown.
+        if (!granted || !lazyToolsEnabled()) deny.push(name);
+        continue;
+      }
+      if (!isBridgedToolName(name)) continue;
+      if (granted && isToolRevealed(agent, name)) continue;
+      deny.push(name);
+    }
+    return deny;
+  }
+
+  function release(agent) {
+    const previous = applied.get(agent);
+    if (previous === undefined) return;
+    applied.delete(agent);
+    try { previous.dispose(); } catch { /* the agent scope may be gone */ }
+  }
+
+  /**
+   * True while this gate is itself mutating a tool layer. Registering or
+   * disposing a restriction runs `ScopedLayers.effect`, which synchronously
+   * emits `tools/change`; the listener below re-enters `reapply()`, which used
+   * to stack one more `restrict()` per level. Every level but the outermost
+   * lost its disposer (only the last handle is kept), so each orphaned deny
+   * mask stayed on the agent scope forever — that is why flipping the switch
+   * back on, or calling `windows_desktop`, never brought the tool back.
+   */
+  let applying = false;
+
+  function applyToAgent(agent) {
+    if (applying) return;
+    if (agent === null || typeof agent !== "object") return;
+    live.add(agent);
+    applying = true;
+    try {
+      const scoped = agent?.ctx?.get?.("tools") ?? agent?.ctx?.tools;
+      if (typeof scoped?.restrict !== "function") return;
+      const deny = denyFor(agent);
+      if (deny === null) return;
+      const key = deny.slice().sort().join(",");
+      const previous = applied.get(agent);
+      if (previous !== undefined && previous.key === key) return;
+      release(agent);
+      if (deny.length === 0) return;
+      try {
+        applied.set(agent, { key, dispose: scoped.restrict({ deny }) });
+      } catch (error) {
+        warn(`could not restrict desktop tools: ${String(error)}`);
+      }
+    } finally {
+      applying = false;
+    }
+  }
+
+  /**
+   * Recompute the restriction for one agent, or for every live agent.
+   * Called from the tool gate itself and from the places that change the
+   * decision (the Computer Use switch, the settings write, the reveal tool).
+   * @param agent - the one agent to update, or undefined for all of them.
+   */
+  function reapply(agent) {
+    if (agent !== undefined) {
+      applyToAgent(agent);
+      return;
+    }
+    for (const candidate of live) applyToAgent(candidate);
+    try {
+      const registry = typeof ctx?.get === "function" ? ctx.get("agents") : undefined;
+      const listed = typeof registry?.list === "function" ? registry.list() : [];
+      if (Array.isArray(listed)) for (const candidate of listed) applyToAgent(candidate);
+    } catch {
+      /* the registry is optional; lifecycle events already track the agents */
+    }
+  }
+  reapplyToolGate = reapply;
+
+  if (typeof ctx?.on === "function") {
+    const hook = (event, handler, message) => {
+      try {
+        ctx.on(event, handler);
+      } catch (error) {
+        if (message) warn(`${message}: ${String(error)}`);
+      }
+    };
+    // The host fuses the agent onto the payload, so destructure it: passing the
+    // payload object itself would silently look at an object without a scope.
+    hook("agent/created", (payload) => { applyToAgent(payload?.agent); });
+    hook("agent/disposed", (payload) => {
+      release(payload?.agent);
+      live.delete(payload?.agent);
+    });
+    // Safety net: repairs a decision the events above could not place yet.
+    //
+    // `agent/pre-step` is a Cordis WATERFALL, not a plain notification: the
+    // host (dsh-agent-loop `preStep()`) dispatches it as
+    // `waterfall("agent/pre-step", payload, () => ({ kind: "enter", messages }))`
+    // and then reads `decision.kind`. A waterfall listener that does not call
+    // `next()` vetoes the rest of the chain *including* that built-in, and its
+    // own return value becomes the decision — so returning `undefined` here
+    // makes the loop throw "Cannot read properties of undefined (reading
+    // 'kind')" and kills every turn before the step even starts. Always hand
+    // the chain back, whatever happened to the gate.
+    hook("agent/pre-step", async (payload, next) => {
+      try { applyToAgent(payload?.agent); } catch { /* a gate failure must never break the step */ }
+      return typeof next === "function" ? next() : undefined;
+    });
+    // The bridge registers its tools after startup, so a restriction computed
+    // from an empty registry has to be recomputed once they exist.
+    hook("tools/change", () => { reapply(); });
+  }
+
+  if (typeof ctx?.inject !== "function") return;
+  try {
+    ctx.inject(["tools"], (scoped) => {
+      try {
+        if (scoped?.tools) toolsService = scoped.tools;
+        if (typeof scoped?.tools?.guard !== "function") return;
+        scoped.tools.guard((execution) => {
+          const name = execution?.name;
+          if (!isBridgedToolName(name)) return undefined;
+          if (!grantedFor(execution?.agent, lookup)) {
+            return `Computer Use is switched off for this session, so "${name}" is not available. Switch the Computer Use control on in this session's composer and retry.`;
+          }
+          if (!isToolRevealed(execution?.agent, name)) {
+            return `"${name}" is hidden to save context. Call ${REVEAL_TOOL_NAME} first (with no arguments it reveals every desktop capability), then retry.`;
+          }
+          return undefined;
+        });
+      } catch (error) {
+        warn(`could not install the Computer Use dispatch guard: ${String(error)}`);
+      }
+    });
+  } catch (error) {
+    warn(`could not inject the tools service for the dispatch guard: ${String(error)}`);
+  }
+}
+
+/**
+ * Register the one-line entry that reveals the desktop capabilities on demand.
+ * The tool itself is tiny; the eighteen bridge schemas only reach the model
+ * after it has been called, which is the whole point.
+ */
+function registerRevealTool(ctx, warn) {
+  if (typeof ctx?.inject !== "function") return;
+  /** Session ids → live sessions, for subagent inheritance. Optional. */
+  const lookup = sessionLookup(ctx);
+  try {
+    ctx.inject(["tools"], (scoped) => {
+      try {
+        if (typeof scoped?.tools?.register !== "function") return;
+        const dispose = scoped.tools.register({
+          name: REVEAL_TOOL_NAME,
+          description: REVEAL_TOOL_DESCRIPTION,
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              names: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  'Capability names to reveal, e.g. "mcp__windows__Screenshot". Omit to reveal every capability.',
+              },
+              query: {
+                type: "string",
+                description:
+                  "Optional keyword filter (screenshot, click, type, window, clipboard, process) when the exact name is unknown.",
+              },
+            },
+          },
+          output: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                revealed: { type: "array", items: { type: "string" } },
+                tools: { type: "array", items: { type: "object" } },
+                note: { type: "string" },
+              },
+              required: ["revealed", "tools", "note"],
+            },
+            render(_args, value) {
+              const lines = [];
+              const revealed = Array.isArray(value?.revealed) ? value.revealed : [];
+              lines.push(
+                revealed.length === 0
+                  ? "No desktop capability was revealed."
+                  : `Revealed ${revealed.length} desktop capability/capabilities for the next step.`,
+              );
+              const catalog = Array.isArray(value?.tools) ? value.tools : [];
+              for (const tool of catalog) {
+                const label = typeof tool?.name === "string" ? tool.name : "unknown";
+                const description = typeof tool?.description === "string" ? tool.description : "";
+                lines.push("", `${label}: ${description}`);
+                if (tool?.parameters !== null && tool?.parameters !== undefined) {
+                  lines.push(`  parameters: ${JSON.stringify(tool.parameters)}`);
+                }
+              }
+              if (typeof value?.note === "string" && value.note !== "") lines.push("", value.note);
+              return [{ type: "text", text: lines.join("\n") }];
+            },
+          },
+          execute(args, exec) {
+            if (!grantedFor(exec?.agent, lookup)) {
+              return {
+                revealed: [],
+                tools: [],
+                note: "Computer Use is switched off for this session, so there is nothing to reveal. Ask the user to switch the Computer Use control on in this session's composer first.",
+              };
+            }
+            const catalog = desktopCatalog(scoped.tools);
+            const names = Array.isArray(args?.names) ? args.names.map((value) => String(value)).filter((value) => value !== "") : [];
+            const query = typeof args?.query === "string" ? args.query.trim().toLowerCase() : "";
+            let picked = catalog;
+            if (names.length > 0) {
+              picked = catalog.filter((entry) =>
+                names.some(
+                  (wanted) =>
+                    wanted === entry.name ||
+                    `${BRIDGE_TOOL_PREFIX}${wanted}` === entry.name ||
+                    (entry.name.startsWith(BRIDGE_TOOL_PREFIX) && entry.name.slice(BRIDGE_TOOL_PREFIX.length) === wanted),
+                ),
+              );
+            } else if (query !== "") {
+              picked = catalog.filter(
+                (entry) => entry.name.toLowerCase().includes(query) || entry.description.toLowerCase().includes(query),
+              );
+            }
+            const state = revealStateFor(exec?.agent);
+            for (const entry of picked) state.names.add(entry.name);
+            if (catalog.length > 0 && picked.length === catalog.length) state.all = true;
+            // Apply now: the next step resolves its tool set before the
+            // pre-step hook runs, so waiting would hide the revealed tools for
+            // one more request than the note promises.
+            if (reapplyToolGate !== null) reapplyToolGate(exec?.agent);
+            const note =
+              picked.length === 0
+                ? `Nothing matched. Known capabilities: ${catalog.map((entry) => entry.name).join(", ")}`
+                : "The revealed tools are callable on the next step; every hidden one stays hidden until you reveal it too.";
+            return { revealed: picked.map((entry) => entry.name), tools: picked, note };
+          },
+        });
+        try {
+          if (typeof dispose === "function" && typeof scoped.on === "function") scoped.on("dispose", dispose);
+        } catch {
+          /* disposal is best-effort */
+        }
+      } catch (error) {
+        warn(`could not register the ${REVEAL_TOOL_NAME} tool: ${String(error)}`);
+      }
+    });
+  } catch (error) {
+    warn(`could not inject the tools service for the reveal tool: ${String(error)}`);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * diagnostics
+ * ------------------------------------------------------------------ */
+
+/**
+ * Build the human-readable doctor report.
+ * @param tools - the `tools` service, or undefined.
+ * @param probe - optional desktop probe outcome (`probeDesktop()` or a fixture).
+ * @param agent - the agent asking, so the switch is reported for *its* session.
+ * @param lookup - session-id resolver for subagent inheritance; optional.
+ */
+function buildReport(tools, probe, agent, lookup) {
+  const lines = [];
+  const advice = [];
+  const granted = grantedFor(agent, typeof lookup === "function" ? lookup : () => null);
+
+  const uv = which("uv");
+  const uvx = which("uvx");
+  const python = which("python") ?? which("py");
+  const manifest = readJson(join(packageRoot, "package.json"));
+
+  lines.push(`dsh-windows-mcp ${selfVersion()} — Windows-MCP bridge diagnostics`);
+  lines.push(`host           : node ${process.version} / ${process.platform} ${process.arch}`);
+  lines.push(`uv             : ${uv ?? "NOT FOUND"}`);
+  lines.push(`uvx            : ${uvx ?? "NOT FOUND"}`);
+  lines.push(`python         : ${python ?? "not on PATH"}`);
+  const dependency = dependencySnapshot(which, windowsMcpVersionPin(readText(patchPath)));
+  lines.push(
+    `windows-mcp    : ${
+      dependency.installed
+        ? `${dependency.version ?? "version unknown"} — ${dependency.executable}`
+        : "not installed through `uv tool` (install it from Settings → Plugins → this bundle, or run `uv tool install windows-mcp`)"
+    }`,
+  );
+
+  const update = updater === null ? null : updater.view();
+  if (update !== null) {
+    const managed = update.versions;
+    lines.push(
+      `managed install : ${
+        managed.active === null
+          ? "none yet — the global `uv tool` installation is used (installing or updating creates one)"
+          : `v${managed.active} under ${managed.toolchainRoot}`
+      }`,
+    );
+    if (managed.previous !== null) lines.push(`  rollback to  : v${managed.previous}`);
+    if (managed.available.length > 0) lines.push(`  installed    : ${managed.available.map((version) => `v${version}`).join(", ")}`);
+    if (update.check.latest === null) {
+      lines.push("  latest       : not checked yet — press Check for updates in Settings → Plugins");
+    } else {
+      lines.push(`  latest       : v${update.check.latest}${managed.updateAvailable ? " — an update is available" : " — up to date"}`);
+    }
+  }
+
+  if (uv === null && uvx === null) {
+    advice.push(
+      "Install uv (https://docs.astral.sh/uv/) and make sure it is on the PATH of the process that runs DSH — the Settings → Desktop page needs it to install Windows-MCP. Booting DSH does not need it.",
+    );
+  }
+
+  const configFile = describeFile(join(windowsMcpHome, "config.toml"));
+  const serverLog = describeFile(join(windowsMcpHome, "server.log"));
+  const startScript = describeFile(join(windowsMcpHome, "start-server.cmd"));
+  lines.push(`~/.windows-mcp : ${existsSync(windowsMcpHome) ? "present" : "absent"}`);
+  lines.push(`  config.toml  : ${configFile === null ? "absent" : `${configFile.bytes} B, ${configFile.modified}`}`);
+  lines.push(`  server.log   : ${serverLog === null ? "absent" : `${serverLog.bytes} B, ${serverLog.modified}`}`);
+  lines.push(`  start-server : ${startScript === null ? "absent" : startScript.path}`);
+  if (startScript !== null) {
+    lines.push(
+      "  note         : a scheduled-task install exists; it serves streamable-http on 127.0.0.1:8000, while this plugin's default row uses stdio.",
+    );
+  }
+
+  // The only check that looks at the live session rather than at files: the
+  // configuration can be perfect while UI Automation is empty.
+  const probeInfo = describeProbe(probe ?? null);
+  lines.push(`desktop probe  : ${probeInfo.line}`);
+
+  lines.push(
+    `computer use   : ${granted ? "ON for this session — the bridged desktop tools are offered and callable" : `OFF for this session — every ${BRIDGE_TOOL_PREFIX}* tool is hidden from the model and denied at dispatch`}`,
+  );
+  lines.push(
+    `lazy tools     : ${
+      lazyToolsEnabled()
+        ? `ON — only ${REVEAL_TOOL_NAME} is offered until the model calls it, then the revealed desktop tools join the next step`
+        : "OFF — every desktop tool schema is offered on every step"
+    }`,
+  );
+  lines.push(
+    `  scope        : per session — the switch belongs to the conversation that flipped it, is never written to disk here, and a session that never decided follows the settings default (${defaultGrantEnabled() ? "ON" : "OFF"})`,
+  );
+  if (!granted) {
+    lines.push(
+      "  hint         : switch it on with the Computer Use control in this session's composer (top-left of the input row) to give this agent the desktop.",
+    );
+  }
+
+  const inventory = toolInventory(tools);
+  if (inventory !== null) {
+    lines.push(`tools          : ${inventory.total} registered, ${inventory.bridged.length} bridged`);
+    lines.push(
+      `  bridged      : ${inventory.bridged.length === 0 ? "NONE — the bridge did not register any windows tool" : inventory.bridged.join(", ")}`,
+    );
+    if (inventory.bridged.length === 0) {
+      advice.push(
+        "No `mcp__windows__*` tool is registered. The bridge row ships disabled so DSH can boot on any network; install the dependency from Settings → Desktop, then restart DSH. If it is installed already, check the effective row below for `disabled`/`command` and the host log for `mcp-client(windows)` lines.",
+      );
+    }
+  } else {
+    lines.push("tools          : (tool runtime did not expose a listing)");
+  }
+
+  const block = bridgeBlock();
+  lines.push("");
+  lines.push(`effective rows from ${patchPath}:`);
+  lines.push(block === null ? "  (cordis.patch.yml missing or has no windows-mcp-bridge row!)" : block);
+  if (block === null) {
+    advice.push("cordis.patch.yml is missing or corrupt — reinstall the plugin package.");
+  }
+
+  lines.push("");
+  lines.push(`declared in package.json: ${manifest?.name ?? "?"}@${manifest?.version ?? "?"}`);
+
+  // The probe can prove an upstream defect. Keep it out of `advice` (which
+  // means "you can fix this here") so the verdict stays honest about ownership.
+  if (probeInfo.notes.length > 0) {
+    lines.push("");
+    lines.push(`upstream       : ${UPSTREAM_UIA_ISSUE}`);
+    for (const note of probeInfo.notes) lines.push(`  - ${note}`);
+  }
+
+  lines.push("");
+  if (advice.length === 0 && probeInfo.notes.length > 0) {
+    lines.push("verdict        : configuration looks complete — the failures above come from Windows UI Automation upstream, not from this installation.");
+  } else if (advice.length === 0) {
+    lines.push("verdict        : configuration looks complete; if a call still fails, read the error text of that call.");
+  } else {
+    lines.push("verdict        : action required");
+    for (const item of advice) lines.push(`  - ${item}`);
+  }
+  return lines.join("\n");
+}
+
+/* ------------------------------------------------------------------ *
+ * plugin entry
+ * ------------------------------------------------------------------ */
+
+/** A logger that cannot throw. */
+function makeLogger(ctx) {
+  let sink = null;
+  try {
+    const candidate = ctx?.logger;
+    sink = typeof candidate === "function" ? candidate(PACKAGE_ID) : candidate ?? null;
+  } catch {
+    sink = null;
+  }
+  return (message) => {
+    try {
+      if (sink !== null && typeof sink.warn === "function") sink.warn(`[${PACKAGE_ID}] ${message}`);
+      else if (sink !== null && typeof sink.info === "function") sink.info(`[${PACKAGE_ID}] ${message}`);
+      else console.warn(`[${PACKAGE_ID}] ${message}`);
+    } catch {
+      /* logging must never break the boot */
+    }
+  };
+}
+
+/**
+ * Startup audit: log exactly one warning when the bridge cannot possibly work,
+ * stay silent otherwise.
+ */
+function auditStartup(warn) {
+  if (!existsSync(patchPath)) {
+    warn(`cordis.patch.yml is missing from ${packageRoot} — no Windows-MCP row was mounted. Reinstall the package.`);
+    return;
+  }
+  if (bridgeBlock() === null) {
+    warn("cordis.patch.yml has no windows-mcp-bridge row — the profile mounted this plugin but no Windows-MCP server.");
+    return;
+  }
+  if (which("uvx") === null && which("uv") === null) {
+    warn("neither `uvx` nor `uv` is on the PATH seen by this DSH process, so the Settings → Desktop page cannot install Windows-MCP. Install uv, then retry the install.");
+  }
+}
+
+/** Register the doctor tool; failures downgrade to one warning. */
+function registerDoctor(ctx, warn) {
+  if (typeof ctx?.inject !== "function") return;
+  /** Session ids → live sessions, for subagent inheritance. Optional. */
+  const lookup = sessionLookup(ctx);
+  try {
+    ctx.inject(["tools"], (scoped) => {
+      try {
+        if (typeof scoped?.tools?.register !== "function") return;
+        const dispose = scoped.tools.register({
+          name: TOOL_NAME,
+          description:
+            "Diagnose the Windows-MCP bridge bundled by dsh-windows-mcp: uv/uvx availability, the ~/.windows-mcp install, the effective bridge row, which mcp__windows__* tools are registered, and a live desktop probe (UI Automation windows and display scaling). Use this when the Windows desktop tools are missing, failing, or report success while doing nothing.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { report: { type: "string" } },
+              required: ["report"],
+              additionalProperties: false,
+            },
+            render(_args, value) {
+              const report = typeof value?.report === "string" ? value.report : JSON.stringify(value, null, 2);
+              return [{ type: "text", text: report }];
+            },
+          },
+          async execute(_args, exec) {
+            // Bounded and read-only; the probe resolves to `{ error }` instead
+            // of throwing, so the report is printed either way.
+            const probe = await probeDesktop();
+            return { report: buildReport(scoped.tools, probe, exec?.agent, lookup) };
+          },
+        });
+        try {
+          if (typeof dispose === "function" && typeof scoped.on === "function") scoped.on("dispose", dispose);
+        } catch {
+          /* disposal is best-effort */
+        }
+      } catch (error) {
+        warn(`could not register the ${TOOL_NAME} tool: ${String(error)}`);
+      }
+    });
+  } catch (error) {
+    warn(`could not inject the tools service: ${String(error)}`);
+  }
+}
+
+/**
+ * Serve the client pill: `GET ?sessionId=…` reports that session's grant plus
+ * the number of bridged tools, `POST {enabled, sessionId}` records a decision for
+ * that one session. The route is registered on the shared web server, so the
+ * page loads it from the same origin it was served from.
+ */
+function registerStateRoute(ctx, warn) {
+  if (typeof ctx?.inject !== "function") return;
+  /** Session ids → live sessions, for subagent inheritance. Optional. */
+  const lookup = sessionLookup(ctx);
+  try {
+    ctx.inject(["webServer"], (scoped) => {
+      try {
+        if (typeof scoped?.webServer?.register !== "function") return;
+
+        const respond = (response, status, body) => {
+          try {
+            const payload = JSON.stringify(body);
+            response.writeHead(status, {
+              "content-type": "application/json; charset=utf-8",
+              "cache-control": "no-store",
+              "content-length": Buffer.byteLength(payload),
+            });
+            response.end(payload);
+          } catch {
+            /* the socket may already be gone */
+          }
+        };
+
+        /**
+         * The signed browser-session cookie the Host's Connection service mints
+         * during the launch-token exchange. Every GUI fetch carries it; `curl`,
+         * a shell script, or another agent cannot produce it, which is what
+         * keeps the Computer Use switch a human decision.
+         * @returns `true`, `false`, or `null` when this deployment mounts no
+         *   Connection service and the answer is not observable.
+         */
+        /** The Host's Connection service, wherever this composition exposes it. */
+        const connectionService = () => {
+          for (const scope of [scoped, ctx]) {
+            try {
+              if (typeof scope?.get === "function") {
+                const found = scope.get("connection");
+                if (found !== null && found !== undefined) return found;
+              }
+            } catch {
+              /* a context without that service is a normal composition */
+            }
+          }
+          return null;
+        };
+
+        /** Whether the cookie gate can be enforced here, for the doctor and the page. */
+        const gateState = () => {
+          const found = connectionService();
+          const auth = found === null ? null : found.browserAuth;
+          const enforced = auth !== null && auth !== undefined && typeof auth.isAuthenticated === "function";
+          return { cookie: enforced ? "enforced" : "unobservable" };
+        };
+
+        const browserSession = (request) => {
+          const connection = connectionService();
+          const auth = connection === null || connection === undefined ? null : connection.browserAuth;
+          if (auth === null || auth === undefined || typeof auth.isAuthenticated !== "function") return null;
+          let secure = false;
+          try {
+            secure = scoped.get("webServer")?.protocol === "https:";
+          } catch {
+            secure = false;
+          }
+          try {
+            return auth.isAuthenticated(request, secure) === true;
+          } catch {
+            return false;
+          }
+        };
+
+        /**
+         * Refuse a mutation that did not come from the GUI window. Reads stay
+         * open; every POST that changes the flag, the patch layer, the settings
+         * or the toolchain has to prove it speaks for the browser session.
+         */
+        const guarded = (handler) => (request, response) => {
+          if (request.method === "POST" && browserSession(request) === false) {
+            respond(response, 401, {
+              error: "this change has to come from the DSH window",
+              hint: "The request carried no signed session cookie. Use the composer switch or the Settings page: a script, or a model with shell access, cannot turn desktop control on for itself.",
+            });
+            return;
+          }
+          handler(request, response);
+        };
+
+        /** Map the version manager's install progress onto the prepare shape the page polls. */
+        const prepareSnapshot = () => {
+          if (updater === null) return null;
+          const install = updater.view().install;
+          return {
+            phase: install.phase === "installing" ? "running" : install.phase,
+            startedAt: install.startedAt,
+            finishedAt: install.finishedAt,
+            error: install.error,
+            log: install.log,
+            bridge: install.bridge,
+            version: install.version,
+            mirror: install.mirror,
+          };
+        };
+
+        /**
+         * Settings plus what the profile patch actually says: the two only
+         * match after a restart, because the MCP client reads its row at boot.
+         */
+        const settingsView = () => {
+          const current = settings === null ? normalizeSettings(null).settings : settings;
+          const patchText = readText(patchPath);
+          const applied = bridgeSettingsMatch(current, patchText);
+          return {
+            settings: current,
+            // The page offers Restore defaults, so it needs the values to restore.
+            defaults: defaultSettings(),
+            bridge: readBridgeSettings(patchText),
+            applied,
+            restartRequired: !applied,
+            pluginVersion: selfVersion(),
+          };
+        };
+
+        /** The session a read asks about, or null for "no particular conversation". */
+        const sessionOfRequest = (request) => {
+          try {
+            const wanted = new URL(String(request?.url ?? ""), "http://127.0.0.1").searchParams.get("sessionId");
+            return typeof wanted === "string" && wanted !== "" ? wanted.slice(0, 128) : null;
+          } catch {
+            return null;
+          }
+        };
+
+        /**
+         * The page's view of the host. `enabled` is the grant of the session the
+         * caller named, and `null` when it named none — the Settings page is not
+         * a conversation, so there is no host-wide answer to give any more.
+         */
+        const snapshot = (sessionId = null) => {
+          const legacy = dependencySnapshot(which, windowsMcpVersionPin(readText(patchPath)));
+          const update = updater === null ? null : updater.view();
+          const dependency = updater === null ? legacy : updater.dependencyView(legacy);
+          // A version check has to compare the build actually in use. `view()`
+          // only knows this plugin's own managed slot, which stays null for a
+          // host that runs the global `uv tool` install — that made every check
+          // announce an update over the version already running.
+          if (update !== null) update.versions.updateAvailable = updateAvailability(update.check.latest, dependency?.version ?? null);
+          const granted = sessionId === null ? null : grantedForSessionId(sessionId, lookup);
+          return {
+            enabled: granted,
+            // The scope is part of the payload so a page never has to assume
+            // the switch is global — the whole point of this route's shape.
+            scope: "session",
+            sessionId,
+            bridged: bridgedToolCount(scoped.get?.("tools")),
+            serverName: "windows",
+            dependency,
+            prepare: prepareSnapshot(),
+            update,
+            settings: settingsView(),
+            // `enforced` means a cookie-less POST is refused; `unobservable`
+            // means this composition mounts no Connection service, so the
+            // routes fall back to loopback reachability.
+            gate: gateState(),
+            desktopTools: {
+              lazy: lazyToolsEnabled(),
+              revealTool: lazyToolsEnabled() && granted === true ? REVEAL_TOOL_NAME : null,
+            },
+          };
+        };
+
+        const handler = (request, response) => {
+          if (request.method === "GET") {
+            respond(response, 200, snapshot(sessionOfRequest(request)));
+            return;
+          }
+          if (request.method !== "POST") {
+            respond(response, 405, { error: "method not allowed" });
+            return;
+          }
+          const chunks = [];
+          let size = 0;
+          request.on("data", (chunk) => {
+            size += chunk.length;
+            if (size > MAX_STATE_BODY_BYTES) {
+              request.destroy();
+              return;
+            }
+            chunks.push(chunk);
+          });
+          request.on("end", () => {
+            let next;
+            try {
+              next = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            } catch {
+              respond(response, 400, { error: "invalid JSON body" });
+              return;
+            }
+            const sessionId = typeof next?.sessionId === "string" ? next.sessionId.trim().slice(0, 128) : "";
+            if (typeof next?.enabled !== "boolean" || sessionId === "") {
+              respond(response, 400, {
+                error: "expected { enabled: boolean, sessionId: string }",
+                hint: "the switch belongs to one conversation: a host-wide write would silently move every other window too",
+              });
+              return;
+            }
+            rememberGrant(sessionId, next.enabled);
+            if (reapplyToolGate !== null) reapplyToolGate();
+            respond(response, 200, snapshot(sessionId));
+          });
+          request.on("error", () => respond(response, 400, { error: "request failed" }));
+        };
+
+        /** Start installing the pinned (or newest known) Windows-MCP into its own tool root. */
+        const prepareHandler = (request, response) => {
+          if (request.method === "GET") {
+            respond(response, 200, snapshot());
+            return;
+          }
+          if (request.method !== "POST") {
+            respond(response, 405, { error: "method not allowed" });
+            return;
+          }
+          if (updater === null) {
+            respond(response, 503, { error: "the version manager is not ready" });
+            return;
+          }
+          const view = updater.view();
+          const target = view.versions.pinned ?? view.check.latest;
+          if (target === null) {
+            respond(response, 409, { started: false, reason: "no Windows-MCP version is known yet", prepare: prepareSnapshot() });
+            return;
+          }
+          if (view.install.phase === "installing") {
+            respond(response, 409, { started: false, reason: "an install is already running", prepare: prepareSnapshot() });
+            return;
+          }
+          void updater
+            .installVersion(target)
+            .then((result) => {
+              if (result === null || result === undefined || result.ok !== true) {
+                warn(`the install did not start: ${result?.error ?? "unknown error"}`);
+              }
+            })
+            .catch((error) => warn(`the install did not start: ${String(error)}`));
+          // A refusal (missing `uv`, unknown version) is recorded synchronously,
+          // before the promise settles, so it can be reported right here instead
+          // of answering 202 and leaving the page on `phase: "idle"`.
+          const after = updater.view().install;
+          const refused = after.phase === "failed" && typeof after.error === "string";
+          respond(response, refused ? 409 : 202, {
+            started: !refused,
+            reason: refused ? after.error : undefined,
+            spec: `windows-mcp@${target}`,
+            prepare: prepareSnapshot(),
+          });
+        };
+
+        /** Stop a running install. */
+        const cancelHandler = (request, response) => {
+          if (request.method !== "POST") {
+            respond(response, 405, { error: "method not allowed" });
+            return;
+          }
+          const result = updater === null ? { cancelled: false } : updater.cancel();
+          respond(response, 200, { cancelled: result.cancelled === true, prepare: prepareSnapshot() });
+        };
+
+        /** Point the bridge at the active executable (managed install first). */
+        const bridgeHandler = (request, response) => {
+          if (request.method !== "POST") {
+            respond(response, 405, { error: "method not allowed" });
+            return;
+          }
+          const view = updater === null ? null : updater.view();
+          const executable = view?.versions?.activeExecutable ?? windowsMcpExecutable();
+          if (executable === null) {
+            respond(response, 409, {
+              ok: false,
+              error: "Windows-MCP is not installed yet, so there is nothing to point the bridge at.",
+            });
+            return;
+          }
+          respond(response, 200, writeBridgeOverride(executable, { warn, version: selfVersion() }));
+        };
+
+        /** Check for, install, activate and roll back Windows-MCP versions. */
+        const updateHandler = (request, response) => {
+          if (request.method === "GET") {
+            respond(response, 200, updater === null ? { error: "the version manager is not ready" } : updater.view());
+            return;
+          }
+          if (request.method !== "POST") {
+            respond(response, 405, { error: "method not allowed" });
+            return;
+          }
+          if (updater === null) {
+            respond(response, 503, { error: "the version manager is not ready" });
+            return;
+          }
+          const chunks = [];
+          let size = 0;
+          request.on("data", (chunk) => {
+            size += chunk.length;
+            if (size > MAX_STATE_BODY_BYTES) {
+              request.destroy();
+              return;
+            }
+            chunks.push(chunk);
+          });
+          request.on("end", () => {
+            let body;
+            try {
+              body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+            } catch {
+              respond(response, 400, { error: "invalid JSON body" });
+              return;
+            }
+            const action = typeof body?.action === "string" ? body.action : "";
+            const version = typeof body?.version === "string" && body.version !== "" ? body.version : null;
+            const allowed = [...UPDATE_ACTIONS, "cancel"];
+            if (!allowed.includes(action)) {
+              respond(response, 400, { error: `expected { action } in ${allowed.join(", ")}` });
+              return;
+            }
+            if (action === "check") {
+              void updater.check({ force: true });
+              respond(response, 202, { started: true, action });
+              return;
+            }
+            if (action === "install") {
+              const view = updater.view();
+              const target = version ?? view.check.latest ?? view.versions.pinned;
+              if (target === null) {
+                respond(response, 409, { ok: false, error: "no Windows-MCP version is known yet — check for updates first" });
+                return;
+              }
+              void updater.installVersion(target);
+              respond(response, 202, { started: true, action, version: target });
+              return;
+            }
+            if (action === "cancel") {
+              respond(response, 200, updater.cancel());
+              return;
+            }
+            if (action === "activate") {
+              if (version === null) {
+                respond(response, 400, { error: "activate needs { version }" });
+                return;
+              }
+              respond(response, 200, updater.activateInstalled(version));
+              return;
+            }
+            respond(response, 200, updater.rollback());
+          });
+          request.on("error", () => respond(response, 400, { error: "request failed" }));
+        };
+
+        /**
+         * Read and update the user settings. Plugin settings apply at once;
+         * bridge settings are written into the profile patch row and only take
+         * effect after DSH restarts.
+         */
+        const settingsHandler = (request, response) => {
+          if (request.method === "GET") {
+            respond(response, 200, settingsView());
+            return;
+          }
+          if (request.method !== "POST") {
+            respond(response, 405, { error: "method not allowed" });
+            return;
+          }
+          const chunks = [];
+          let size = 0;
+          request.on("data", (chunk) => {
+            size += chunk.length;
+            if (size > MAX_SETTINGS_BODY_BYTES) {
+              request.destroy();
+              return;
+            }
+            chunks.push(chunk);
+          });
+          request.on("end", () => {
+            let body;
+            try {
+              body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+            } catch {
+              respond(response, 400, { error: "invalid JSON body" });
+              return;
+            }
+            const incoming = body !== null && typeof body === "object" && body.settings !== null && typeof body.settings === "object" ? body.settings : body;
+            const normalized = normalizeSettings(incoming);
+            const stored = writeSettings(normalized.settings, stateDirectory);
+            settings = stored.settings;
+            if (reapplyToolGate !== null) reapplyToolGate();
+            const wanted = bridgeSettingsOf(settings);
+            if (bridgeSettingsMatch(settings, readText(patchPath))) {
+              respond(response, 200, {
+                ok: true,
+                saved: stored.written,
+                problems: normalized.problems,
+                write: null,
+                ...settingsView(),
+              });
+              return;
+            }
+            const view = updater === null ? null : updater.view();
+            const executable = view?.versions?.activeExecutable ?? windowsMcpExecutable();
+            if (executable === null) {
+              respond(response, 200, {
+                ok: true,
+                saved: stored.written,
+                problems: normalized.problems,
+                write: { ok: false, error: "Windows-MCP is not installed yet, so the bridge row was left untouched" },
+                ...settingsView(),
+              });
+              return;
+            }
+            const written = writeBridgeOverride(executable, { warn, version: selfVersion(), settings: wanted });
+            respond(response, 200, {
+              ok: written.ok === true,
+              saved: stored.written,
+              problems: normalized.problems,
+              write: written,
+              ...settingsView(),
+            });
+          });
+          request.on("error", () => respond(response, 400, { error: "request failed" }));
+        };
+
+        // Every mutation is gated on the GUI's signed session cookie: the
+        // Host's launch token is the only way to obtain one, so desktop
+        // control cannot be switched on by a script or by another agent.
+        scoped.webServer.register({ kind: "exact", path: STATE_ROUTE, handler: guarded(handler) });
+        scoped.webServer.register({ kind: "exact", path: PREPARE_ROUTE, handler: guarded(prepareHandler) });
+        scoped.webServer.register({ kind: "exact", path: PREPARE_CANCEL_ROUTE, handler: guarded(cancelHandler) });
+        scoped.webServer.register({ kind: "exact", path: BRIDGE_ROUTE, handler: guarded(bridgeHandler) });
+        scoped.webServer.register({ kind: "exact", path: UPDATE_ROUTE, handler: guarded(updateHandler) });
+        scoped.webServer.register({ kind: "exact", path: SETTINGS_ROUTE, handler: guarded(settingsHandler) });
+      } catch (error) {
+        warn(`could not register the Computer Use state route: ${String(error)}`);
+      }
+    });
+  } catch (error) {
+    warn(`could not inject the web server: ${String(error)}`);
+  }
+}
+
+/**
+ * Plugin entry point. Never throws.
+ * @param ctx - host cordis context.
+ */
+export function apply(ctx) {
+  try {
+    const warn = makeLogger(ctx);
+    settings = readSettings(stateDirectory);
+    updater = createUpdater({
+      warn,
+      resolver: which,
+      pinned: windowsMcpVersionPin(readText(patchPath)),
+      preferredMirror: () => (settings === null ? "auto" : settings.plugin.preferredMirror),
+      writeBridge: (executable) =>
+        writeBridgeOverride(executable, {
+          warn,
+          version: selfVersion(),
+          settings: settings === null ? null : bridgeSettingsOf(settings),
+        }),
+    });
+    auditStartup(warn);
+    registerDoctor(ctx, warn);
+    registerStateRoute(ctx, warn);
+    registerToolGate(ctx, warn);
+    registerRevealTool(ctx, warn);
+    // Check for a newer Windows-MCP build in the background (cheap: a ranged
+    // read per mirror, cached for hours). The page shows the result; the boot
+    // never waits for it, and a failure only costs the last known answer. The
+    // settings page can turn this off.
+    if (settings === null || settings.plugin.autoCheckUpdates === true) {
+      try {
+        void updater.check({ force: false }).catch(() => {});
+      } catch {
+        /* a failed check is not a boot problem */
+      }
+    }
+  } catch {
+    /* apply() must not throw, whatever happens */
+  }
+}
+
+export default { name: PACKAGE_ID, apply };

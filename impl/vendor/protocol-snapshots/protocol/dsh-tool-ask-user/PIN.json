@@ -1,0 +1,5 @@
+{
+  "name": "@deepseek-ai/dsh-tool-ask-user",
+  "version": "0.2.2-rc.1",
+  "description": "Model-facing ask_user_question tool over the ctx.userQuestions seam"
+}

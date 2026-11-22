@@ -1,0 +1,18 @@
+{
+  "name": "dsh-plugin-cards",
+  "version": "0.9.34",
+  "description": "DeepSeek Harness (dsh) 设置卡片 + 对话节点插件",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web"
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-cards@0.9.34/lib/client.js"
+}

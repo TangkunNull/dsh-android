@@ -1,0 +1,11 @@
+{
+  "name": "dsh-intl-polyfill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Intl polyfill for the Android runtime: libnode is built with --with-intl=none, so V8 has no i18n code and globalThis.Intl is undefined. Loaded by harness.js before booting dsh.",
+  "main": "intl-polyfill.mjs",
+  "exports": {
+    ".": "./intl-polyfill.mjs"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "dsh-plugin-appshot",
+  "version": "0.4.2",
+  "description": "dsh-plugin-appshot — a DeepSeek Harness plugin for macOS and Windows context screenshot capture.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web",
+      "immediately": false
+    }
+  },
+  "source": "https://unpkg.com/dsh-plugin-appshot@0.4.2/dist/client.js"
+}

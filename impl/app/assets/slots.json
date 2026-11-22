@@ -1,0 +1,485 @@
+{
+  "plugin": "dsh-windows-mcp",
+  "slots": {
+    "conversation.input.left": {
+      "id": "n10",
+      "t": "box",
+      "cls": "dwmc-host",
+      "layout": {
+        "display": "contents"
+      },
+      "children": [
+        {
+          "id": "n9",
+          "t": "box",
+          "cls": "dwmc-pill",
+          "attrs": {
+            "data-state": "off",
+            "data-busy": "0",
+            "aria-checked": false,
+            "aria-label": "AI 控制电脑"
+          },
+          "layout": {
+            "display": "flex",
+            "alignItems": "center",
+            "gap": 6,
+            "height": 28,
+            "padding": [
+              0,
+              5,
+              0,
+              5
+            ]
+          },
+          "paint": {
+            "radius": "var(--dsw-radius-sm)",
+            "bg": {
+              "raw": "transparent"
+            },
+            "fg": {
+              "token": "--dsw-alias-label-secondary"
+            },
+            "cursor": "pointer",
+            "transition": "none"
+          },
+          "textStyle": {
+            "size": 13,
+            "weight": 500,
+            "lineHeight": 20,
+            "whiteSpace": "nowrap"
+          },
+          "on": {
+            "press": "n9:onClick"
+          },
+          "children": [
+            {
+              "id": "n1",
+              "t": "text",
+              "cls": "dwmc-dot",
+              "layout": {
+                "width": 6,
+                "height": 6,
+                "flexGrow": 0,
+                "flexShrink": 0,
+                "flexBasis": "auto"
+              },
+              "paint": {
+                "radius": 999,
+                "bg": {
+                  "token": "--dsw-alias-state-idle-primary"
+                },
+                "transition": "none",
+                "fg": {
+                  "token": "--dsw-alias-label-secondary"
+                }
+              }
+            },
+            {
+              "id": "n6",
+              "t": "icon",
+              "cls": "dwmc-icon",
+              "attrs": {
+                "aria-hidden": "true"
+              },
+              "layout": {
+                "width": 14,
+                "height": 14,
+                "flexGrow": 0,
+                "flexShrink": 0,
+                "flexBasis": "auto",
+                "display": "block"
+              },
+              "paint": {
+                "fg": {
+                  "token": "--dsw-alias-label-secondary"
+                }
+              },
+              "paths": [
+                {
+                  "rect": [
+                    "1.4",
+                    "2.4",
+                    "13.2",
+                    "9",
+                    "1.6"
+                  ]
+                },
+                {
+                  "d": "M5.6 14.2h4.8"
+                },
+                {
+                  "d": "M8 11.4v2.8"
+                },
+                {
+                  "d": "M9.2 6.1l3 1.1-1.2.7-.7 1.2z",
+                  "fill": "currentColor",
+                  "stroke": "none"
+                }
+              ],
+              "viewBox": "0 0 16 16"
+            },
+            {
+              "id": "n8",
+              "t": "text",
+              "cls": "dwmc-label",
+              "layout": {
+                "display": "none"
+              },
+              "paint": {
+                "fg": {
+                  "token": "--dsw-alias-label-secondary"
+                }
+              },
+              "text": "AI 控制电脑"
+            }
+          ]
+        }
+      ]
+    },
+    "plugins.bundle.config": {
+      "id": "n17",
+      "t": "box",
+      "cls": "dwmc-panel",
+      "layout": {
+        "display": "flex",
+        "flexDirection": "column",
+        "gap": 10
+      },
+      "paint": {
+        "fg": {
+          "token": "--dsw-alias-label-primary"
+        }
+      },
+      "textStyle": {
+        "size": 13,
+        "lineHeight": 1.55
+      },
+      "children": [
+        {
+          "id": "n14",
+          "t": "box",
+          "cls": "dwmc-panel__head",
+          "layout": {
+            "display": "flex",
+            "alignItems": "center",
+            "gap": 8
+          },
+          "paint": {
+            "fg": {
+              "token": "--dsw-alias-label-primary"
+            }
+          },
+          "textStyle": {
+            "weight": 600
+          },
+          "children": [
+            {
+              "id": "n11",
+              "t": "text",
+              "cls": "dwmc-dot",
+              "attrs": {
+                "data-tone": "warn"
+              },
+              "layout": {
+                "width": 6,
+                "height": 6,
+                "flexGrow": 0,
+                "flexShrink": 0,
+                "flexBasis": "auto"
+              },
+              "paint": {
+                "radius": 999,
+                "bg": {
+                  "token": "--dsw-alias-state-warn-primary"
+                },
+                "transition": "none",
+                "fg": {
+                  "token": "--dsw-alias-label-primary"
+                }
+              }
+            },
+            {
+              "id": "n13",
+              "t": "text",
+              "paint": {
+                "fg": {
+                  "token": "--dsw-alias-label-primary"
+                }
+              },
+              "text": "Windows 桌面自动化（Windows-MCP）"
+            }
+          ]
+        },
+        {
+          "id": "n16",
+          "t": "text",
+          "cls": "dwmc-note",
+          "layout": {
+            "margin": [
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "paint": {
+            "fg": {
+              "token": "--dsw-alias-label-secondary"
+            }
+          },
+          "textStyle": {
+            "size": 12
+          },
+          "text": "安装、更新和回退都在 设置 → 桌面控制 里管理。"
+        }
+      ]
+    },
+    "plugins.bundle.activation": {
+      "id": "n29",
+      "t": "box",
+      "cls": "dwmc-panel",
+      "layout": {
+        "display": "flex",
+        "flexDirection": "column",
+        "gap": 10
+      },
+      "paint": {
+        "fg": {
+          "token": "--dsw-alias-label-primary"
+        }
+      },
+      "textStyle": {
+        "size": 13,
+        "lineHeight": 1.55
+      },
+      "children": [
+        {
+          "id": "n21",
+          "t": "box",
+          "cls": "dwmc-panel__head",
+          "layout": {
+            "display": "flex",
+            "alignItems": "center",
+            "gap": 8
+          },
+          "paint": {
+            "fg": {
+              "token": "--dsw-alias-label-primary"
+            }
+          },
+          "textStyle": {
+            "weight": 600
+          },
+          "children": [
+            {
+              "id": "n18",
+              "t": "text",
+              "cls": "dwmc-dot",
+              "attrs": {
+                "data-tone": "warn"
+              },
+              "layout": {
+                "width": 6,
+                "height": 6,
+                "flexGrow": 0,
+                "flexShrink": 0,
+                "flexBasis": "auto"
+              },
+              "paint": {
+                "radius": 999,
+                "bg": {
+                  "token": "--dsw-alias-state-warn-primary"
+                },
+                "transition": "none",
+                "fg": {
+                  "token": "--dsw-alias-label-primary"
+                }
+              }
+            },
+            {
+              "id": "n20",
+              "t": "text",
+              "paint": {
+                "fg": {
+                  "token": "--dsw-alias-label-primary"
+                }
+              },
+              "text": "Windows 桌面自动化（Windows-MCP）"
+            }
+          ]
+        },
+        {
+          "id": "n23",
+          "t": "text",
+          "cls": "dwmc-note",
+          "layout": {
+            "margin": [
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "paint": {
+            "fg": {
+              "token": "--dsw-alias-label-secondary"
+            }
+          },
+          "textStyle": {
+            "size": 12
+          },
+          "text": "首次约 60 MB，一次即可；安装完成后会自动把桥指向它，重启 DSH 生效。"
+        },
+        {
+          "id": "n28",
+          "t": "box",
+          "cls": "dwmc-actions",
+          "layout": {
+            "display": "flex",
+            "flexWrap": "wrap",
+            "gap": 8,
+            "alignItems": "center"
+          },
+          "paint": {
+            "fg": {
+              "token": "--dsw-alias-label-primary"
+            }
+          },
+          "children": [
+            {
+              "id": "n25",
+              "t": "box",
+              "cls": "dwmc-btn dwmc-btn--quiet",
+              "layout": {
+                "display": "flex",
+                "alignItems": "center",
+                "gap": 6,
+                "height": 28,
+                "padding": [
+                  0,
+                  12,
+                  0,
+                  12
+                ]
+              },
+              "paint": {
+                "cursor": "not-allowed",
+                "radius": 8,
+                "borderWidth": 1,
+                "borderColor": {
+                  "token": "--dsw-alias-border-l1"
+                },
+                "bg": {
+                  "raw": "transparent"
+                },
+                "fg": {
+                  "token": "--dsw-alias-label-secondary"
+                },
+                "opacity": 0.55
+              },
+              "textStyle": {
+                "size": 12
+              },
+              "text": "检查更新",
+              "on": {
+                "press": "n25:onClick"
+              }
+            },
+            {
+              "id": "n27",
+              "t": "box",
+              "cls": "dwmc-btn",
+              "layout": {
+                "display": "flex",
+                "alignItems": "center",
+                "gap": 6,
+                "height": 28,
+                "padding": [
+                  0,
+                  12,
+                  0,
+                  12
+                ]
+              },
+              "paint": {
+                "cursor": "not-allowed",
+                "radius": 8,
+                "borderWidth": 1,
+                "borderColor": {
+                  "token": "--dsw-alias-brand-primary"
+                },
+                "bg": {
+                  "raw": "transparent"
+                },
+                "fg": {
+                  "token": "--dsw-alias-brand-primary"
+                },
+                "opacity": 0.55
+              },
+              "textStyle": {
+                "size": 12
+              },
+              "text": "下载并安装",
+              "on": {
+                "press": "n27:onClick"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "settings.section.icon": {
+      "id": "n33",
+      "t": "icon",
+      "attrs": {
+        "aria-hidden": "true"
+      },
+      "paths": [
+        {
+          "d": "M2.6 2.6h10.8c.66 0 1.2.54 1.2 1.2v6.4c0 .66-.54 1.2-1.2 1.2H2.6c-.66 0-1.2-.54-1.2-1.2V3.8c0-.66.54-1.2 1.2-1.2Zm3.1 2.5 4.5 2.85-2.1.36.98 2.06-1.16.55-0.97-2.05-1.3 1.05z"
+        },
+        {
+          "rect": [
+            7,
+            11.2,
+            2,
+            1.7,
+            0.3
+          ]
+        },
+        {
+          "rect": [
+            5.2,
+            12.9,
+            5.6,
+            1.4,
+            0.7
+          ]
+        }
+      ],
+      "viewBox": "0 0 16 16"
+    },
+    "settings.section": {
+      "id": "n35",
+      "t": "text",
+      "cls": "dwmc-note",
+      "layout": {
+        "margin": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "paint": {
+        "fg": {
+          "token": "--dsw-alias-label-secondary"
+        }
+      },
+      "textStyle": {
+        "size": 12
+      },
+      "text": "正在测速…"
+    }
+  }
+}

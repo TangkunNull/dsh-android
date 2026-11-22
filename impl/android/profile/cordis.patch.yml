@@ -1,0 +1,279 @@
+# The Android profile: dsh-base, retargeted at a device with no kernel sandbox,
+# no bash in $PATH, and no LibreOffice.
+#
+# Layering: @deepseek-ai/dsh-base inserts the core tree; this file patches it.
+# Nothing here invents new behaviour — every override below is the same shape
+# the shipped bundles use for their own platforms (`!!js process.platform`),
+# which is what makes this profile a configuration, not a fork.
+#
+# What Android cannot do, and therefore what each block disables or retargets:
+#
+#   * sandbox-local picks a confinement runner per platform
+#     (linux: bwrap→landlock, darwin: seatbelt, win32: windows-acl) and FAILS
+#     CLOSED on a platform with no chain. Android has none of those, so the row
+#     is disabled outright; when the boot probe finds a usable landlock runner,
+#     @dsh-android/sandbox takes over ctx.sandbox instead.
+#   * fs-sandbox is NOT a wrapper over confine(): it fences model-supplied paths
+#     in trusted JS and stays mounted in both compositions.
+#   * pwsh-* are Windows-only by construction.
+#   * otel exports spans to a collector; offline there is nobody to receive them.
+#   * hmr watches source files for a dev server that does not exist here.
+#
+# Everything else in dsh-base is plain Node and runs unchanged.
+
+# ── confinement: two compositions, decided by the pre-boot probe ─────────────
+# `DSH_SANDBOX_ANDROID` is written by the host launcher AFTER it ran
+# `<runner> --probe` (ADR-0001 §3.3): `landlock` means the kernel accepted the
+# ruleset, `none` means it did not. The composition must therefore be decided
+# from the env, not from a probe inside confine() — by the time confine() runs,
+# bash-sandbox and permission-presets are already mounted and every command
+# would fail with SANDBOX_UNAVAILABLE.
+#
+#   landlock: our provider + bash-sandbox + fs-sandbox + permission presets
+#   none    : no provider + bash-local + fs-sandbox (still fences writes)
+#
+# fs-sandbox is mounted in BOTH rows. On `none` it is the net gain over the
+# previous state: its fence is canonicalize-then-contain in trusted JS over the
+# model-supplied path, zero kernel dependency, so it keeps working when
+# landlock does not. It prevents misplaced writes inside the app's own
+# directory — not bypasses (`rm` through bash still works). Do not call it a
+# sandbox.
+
+# The official provider: Android is absent from PLATFORM_CHAINS
+# (dsh-sandbox-local/lib/index.js:175-179), so it would fail closed forever.
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+  disabled: true
+
+# Our provider, only when the boot probe said landlock is enforced. The runner
+# path comes from the host: it contains the APK signature and version, so
+# guessing `/data/app/...` here would be a bug waiting for the next install.
+- insert:
+    - id: sandbox-android
+      name: '@dsh-android/sandbox'
+      disabled: !!js "process.env.DSH_SANDBOX_ANDROID !== 'landlock'"
+      config:
+        runnerPath: !!js "process.env.DSH_SANDBOX_RUNNER ?? ''"
+        # The boot probe already answered; the provider must not pay a second
+        # fork on the first command. It still refuses if the file is gone or is
+        # not executable (that check is free, no fork).
+        requireRunner: !!js "process.env.DSH_SANDBOX_ANDROID === 'landlock'"
+        # Not a constant: this is the probe's `partial` (SandboxProbe -> HarnessService).
+        # landlock's FS_TRUNCATE exists only from ABI 3, and Android 6.1 GKI ships
+        # ABI 2 — there the confined process can still truncate() files it can read,
+        # so claiming `full` would promise something the kernel does not enforce.
+        # Empty means "unknown"; the provider then falls back to `full`.
+        enforcement: !!js "process.env.DSH_SANDBOX_ENFORCEMENT ?? ''"
+        probeTimeoutMs: 5000
+
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-bash-sandbox'
+  disabled: !!js "process.env.DSH_SANDBOX_ANDROID !== 'landlock'"
+
+- id: pwsh-sandbox
+  name: '@deepseek-ai/dsh-pwsh-sandbox'
+  disabled: true
+
+# Unconditionally restored: this is the only protection that survives a kernel
+# without landlock, and the writer fence never stats `/tmp` — its containment
+# check is lexical-first, then stat of the ROOT (missing root simply matches
+# nothing), so a nonexistent /tmp cannot fail a write here.
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-sandbox'
+  disabled: false
+
+# `workspace-write` in both rows: under danger-full-access fs-sandbox is a no-op
+# and would leave nothing enforcing anything.
+#
+# workspaceRoot is set by the host (HarnessService sets DSH_WORKSPACE_ROOT to
+# filesDir/workspace). The fallback deliberately does NOT use bare process.cwd():
+# the host chdirs to filesDir, so a cwd fallback would hand the model the whole
+# runtime tree — node_modules, the profile, and dsh-home/.credentials.yaml.
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: !!js "process.env.DSH_PERMISSION_MODE ?? 'workspace-write'"
+    workspaceRoot: !!js "process.env.DSH_WORKSPACE_ROOT ?? ((process.env.DSH_WORK_DIR ?? process.cwd()) + '/workspace')"
+
+# permission-presets hard-throws unless the mounted executor reports a
+# sandboxMode (dsh-permission-presets/lib/index.js:180) — i.e. only while
+# ctx.shell is bash-sandbox. It lives and dies with the `landlock` row.
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  disabled: !!js "process.env.DSH_SANDBOX_ANDROID !== 'landlock'"
+
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: ask
+
+# ── ctx.fs / ctx.shell ──────────────────────────────────────────────────────
+# fs-sandbox is the ctx.fs provider in both rows, so fs-local is not inserted at
+# all (not even disabled): two live rows would fight over the same service name.
+# Every dependent row (working-directory, tool-fs, skills, subagents) waits on
+# `ctx.fs`.
+#
+# bash-local is the fallback executor when there is no runner: LocalBashExecutor
+# spawns `bash -c <command>` through ctx.subprocess, no kernel features. The app
+# ships a `bash` on PATH (see impl/android/profile/README.md for why it is a shim
+# first and a real bash later); without one, every command would ENOENT.
+- insert:
+    - id: bash-local
+      name: '@deepseek-ai/dsh-bash-local'
+      disabled: !!js "process.env.DSH_SANDBOX_ANDROID === 'landlock'"
+      config:
+        timeoutMs: 60000
+        maxTimeoutMs: 600000
+
+# ── Windows-only rows ───────────────────────────────────────────────────────
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: true
+
+# ── offline: nothing to export to, nobody to export for ─────────────────────
+- id: otel
+  name: '@deepseek-ai/dsh-otel'
+  disabled: true
+
+- id: session-telemetry-otel
+  name: '@deepseek-ai/dsh-session-telemetry-otel'
+  disabled: true
+
+# ── dev-server machinery ────────────────────────────────────────────────────
+- id: hmr
+  name: '@deepseek-ai/dsh-hmr'
+  disabled: true
+
+# ── programmatic tool calling: the one chain that hard-requires sandbox ─────
+# ptc-runtime injects `sandbox` to run model-authored code under confinement.
+# The only confinement this profile can offer is our own landlock runner, and it
+# is unproven on a real device (ADR-0001 §6) — running unattended generated code
+# on that is the one thing this profile should not do by accident. So the whole
+# chain (runtime → engine → tool) is off; the ordinary tool executor is unaffected.
+- id: ptc-runtime
+  name: '@deepseek-ai/dsh-ptc-runtime-node'
+  disabled: true
+
+- id: workflow-ptc
+  name: '@deepseek-ai/dsh-workflow-ptc'
+  disabled: true
+
+- id: tool-workflow
+  name: '@deepseek-ai/dsh-tool-workflow'
+  disabled: true
+
+# ── 自定义模型端点（OpenAI 兼容）─────────────────────────────────────────────
+# 宿主（HarnessService）从 filesDir/llm.json 读出用户填的 baseURL / model /
+# protocol，以 DSH_LLM_* 环境变量传进来；这里只做「有则切路由，无则用内置」。
+#
+# 两条都是**已存在**的条目（dsh-base 插入的），所以用 id + config 覆盖，
+# 不能用 insert —— insert 会造出第二个同名服务。
+#
+# pi-ai 的 providers 是 schemastery 校验的字典，!!js 必须返回对象本身，
+# 不能返回 JSON 字符串。空对象 = 保持 dormant（零路由），这是不配置时的默认态。
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers: !!js "process.env.DSH_LLM_BASE_URL && process.env.DSH_LLM_MODEL ? { local: { api: process.env.DSH_LLM_PROTOCOL || 'openai-completions', baseURL: process.env.DSH_LLM_BASE_URL, apiKeyEnv: 'DSH_LOCAL_API_KEY', displayName: 'Local endpoint', models: [{ id: process.env.DSH_LLM_MODEL }] } } : {}"
+
+# 默认模型跟着路由走：有自定义端点就选 local/<模型名>，否则回到内置的
+# deepseek-official/deepseek-flash。两个字段分别求值，避免一半切换一半没切。
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: !!js "process.env.DSH_LLM_BASE_URL && process.env.DSH_LLM_MODEL ? 'local' : 'deepseek-official'"
+    model: !!js "process.env.DSH_LLM_BASE_URL && process.env.DSH_LLM_MODEL ? process.env.DSH_LLM_MODEL : 'deepseek-flash'"
+
+# ── the transport the Flutter side talks to ─────────────────────────────────
+# base already carries dsh-api-gateway and dsh-api-remote-access; what it lacks
+# is a socket to serve them on (that row lives in dsh-web-app, together with the
+# browser roster we do not want). Adding only the webserver gives the same
+# /api/<namespace>/<method> surface the web profile exposes, minus the page.
+#
+# 127.0.0.1 rather than 0.0.0.0: the webserver rejects wildcard binds outright,
+# and a loopback socket inside the app's own network namespace is unreachable
+# from other apps anyway.
+#
+# The port comes from the environment because the harness picks a free one at
+# startup and passes it down; a hardcoded 7020 would collide with a second
+# instance (two sessions, or a stale process after a crash).
+- insert:
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      config:
+        host: 127.0.0.1
+        port: !!js Number(process.env.DSH_PORT ?? 7020)
+        compression: none
+
+# ── the /api prefix itself ──────────────────────────────────────────────────
+# api-gateway owns the RPC surface, but something has to register the URL prefix
+# on the web server and answer the launch-token exchange. That is
+# dsh-client-connection, the same row sdk-app inserts for headless hosts (its
+# comment there: "share native desktop tools and model context without starting
+# a Web server"). It also owns the browser roster scan, which finds nothing here
+# because no client-ui-* bundle is loaded.
+- insert:
+    - id: connection
+      name: '@deepseek-ai/dsh-client-connection'
+
+# ── the endpoints themselves ────────────────────────────────────────────────
+# base carries the gateway but no Remote methods to export: every endpoint
+# (session/list, session/prompt, session/follow, permission answers, workspace
+# browse, model catalog …) is registered by one of these controller packages.
+# They are host-side rows — nothing here draws UI; the browser roster they
+# normally pair with lives in dsh-web-app, which this profile does not load.
+- insert:
+    - id: session-controller
+      name: '@deepseek-ai/dsh-api-session-controller'
+    - id: job-controller
+      name: '@deepseek-ai/dsh-api-job-controller'
+    - id: terminal-controller
+      name: '@deepseek-ai/dsh-api-terminal-controller'
+    - id: workspace-files
+      name: '@deepseek-ai/dsh-api-workspace-files'
+    - id: account-controller
+      name: '@deepseek-ai/dsh-api-account-controller'
+    - id: settings-controller
+      name: '@deepseek-ai/dsh-api-settings-controller'
+    - id: workspace-controller
+      name: '@deepseek-ai/dsh-api-workspace-controller'
+    - id: api-remotes
+      name: '@deepseek-ai/dsh-api-remotes'
+
+# ── services those controllers read ────────────────────────────────────────
+# session-controller waits on fileUploads + workspaceRegistry;
+# workspace-controller waits on workspaceRegistry. Both are plain host
+# services; the uploader writes under the app's own files dir.
+- insert:
+    - id: file-upload
+      name: '@deepseek-ai/dsh-client-file-upload'
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+
+# ── full-text session search: sqlite replaced ───────────────────────────────
+# The bundled libnode is the lite build: it has Node's sqlite *bindings* but not
+# the SQLite library underneath (`readelf --dyn-syms` has zero `sqlite3_*`
+# symbols), so `@deepseek-ai/dsh-session-query-sqlite` can never open its index
+# here. Upstream ships it with `openAt: never`, which is why search was simply
+# absent rather than visibly broken.
+#
+# The base class `SessionQueryEngine` is a complete service on its own — corpus
+# reads, titles, lineage — and only lacks `searchSessions` / `searchEvents`,
+# which the sqlite subclass adds on top of an FTS table. `android/session-query`
+# fills exactly those two in with a linear scan over the same search documents,
+# so search works with no native dependency at all.
+#
+# The group + `isolate` is upstream's own shape (`dsh-experimental-session-search`):
+# it keeps this engine from shadowing the root `sessionQuery`, which other
+# plugins (web sidebar title search) read and expect to be the sqlite one.
+- insert:
+    - id: session-search
+      name: cordis:group
+      group: true
+      isolate:
+        sessionQuery: true
+      config:
+        - id: session-query
+          name: '@dsh-android/session-query'
+        - id: tool-session-query
+          name: '@deepseek-ai/dsh-tool-session-query'

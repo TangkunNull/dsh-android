@@ -1,0 +1,19 @@
+{
+  "name": "@dsh-android/sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Android 沙箱 provider：把 ctx.sandbox 的 confine 契约接到原生 landlock runner 上",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-sandbox": "^0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "^3.19.0"
+  }
+}

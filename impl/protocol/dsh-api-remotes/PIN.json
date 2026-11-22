@@ -1,0 +1,5 @@
+{
+  "name": "@deepseek-ai/dsh-api-remotes",
+  "version": "0.0.1-rc.1",
+  "description": "Remote BFF assembly and Host Agent/Session lookup policy"
+}
