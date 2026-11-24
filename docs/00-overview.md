@@ -23,8 +23,8 @@ Flutter（unix_bridge.dart）
 
 | 项 | 状态 | 数字 | 证据 |
 |---|---|---|---|
-| APK | 两个模块都可构建 | 探针 48.4 MB / **Flutter 壳 112.7 MB** | `out/dsh-app-debug.apk`、`out/dsh-flutter-debug.apk` |
-| 运行时闭包 | 已进 assets | 378 包 / 16452 文件 / zip 28.5 MB / 解压 105.9 MB | `.artifacts/pack-report.json` |
+| APK | 两个模块都可构建 | 探针 57 MB / **主应用 63 MB**（release） | `out/dsh-probe-<版本>-release.apk`、`out/dsh-android-<版本>-release.apk` |
+| 运行时闭包 | 已进 assets | 378 包 / 16433 文件 / zip 29.6 MB / 解压 106.9 MB | `.artifacts/pack-report.json` |
 | libnode | 24.20.0 full | 62 MB（strip 后），4 段 `LOAD Align=0x4000` | `strings`、`readelf -lW` |
 | 测试 | 全绿 | Node 210 / Flutter 147 | `npm test`、`flutter test` |
 | 真实插件 | 分级 | A=20 / B=6 / C=0 / N=2 | `regress.mjs` |

@@ -8,8 +8,8 @@
 
 | 模块 | 路径 | applicationId | 产物 | 用途 |
 |---|---|---|---|---|
-| 探针宿主 | `impl/android/app` | `ai.dsh.probe` | `out/dsh-app-debug.apk`（48.4 MB） | 无 UI 的诊断壳，验证 libnode / 解压 / 沙箱探测 |
-| **Flutter 壳** | `impl/app/android/app` | `ai.dsh.app` | `out/dsh-flutter-debug.apk`（82.8 MB） | **主产品**，真正的 UI |
+| 探针宿主 | `impl/android/app` | `ai.dsh.probe` | `out/dsh-probe-<版本>-release.apk`（57 MB） | 无 UI 的诊断壳，验证 libnode / 解压 / 沙箱探测 |
+| **主应用** | `impl/app/android/app` | `ai.dsh.app` | `out/dsh-android-<版本>-release.apk`（63 MB） | **主产品**，真正的 UI，桌面名称 `DSH Android` |
 
 两者是**独立的 Gradle 根**，AGP 版本也不同——这不是疏漏，是 Flutter 3.0 的上限。
 
