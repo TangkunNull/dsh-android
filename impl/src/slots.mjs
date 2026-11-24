@@ -112,7 +112,33 @@ export function createSlotRegistry({ owner = null } = {}) {
     register(meta, Component) {
       return push({ name: meta.name, meta, Component });
     },
+    /**
+     * `registerFactory(options, component)` —— 上游的「按次实例化」注册入口。
+     *
+     * 真实语义：factory 注册的是一个**模板**，渲染时按 occurrence 多次实例化
+     * （同一张卡片在消息流里出现 N 次）。我们的插槽是构建期的静态快照，没有
+     * occurrence 这个概念，所以降级成"注册一次"：宁可少渲染几次，也不要因为
+     * 方法不存在让整个插件的 apply 抛错 —— `approval` / `attachment` / `chat` /
+     * `conversation` 四个包就是死在这一句上的（apply 抛 → 插槽数为 0）。
+     * 真正的 factory 语义要等上游 runtime 接上（roadmap 下一轮）。
+     */
+    registerFactory(meta, Component) {
+      if (!meta || typeof meta.name !== 'string') return { dispose() {} };
+      return push({ name: meta.name, meta, Component });
+    },
     list(name) {
+      return byName.get(name) || [];
+    },
+    /**
+     * `entriesOfSlot(key)` —— 渲染器读"这个插槽当前该渲染哪些条目"的入口。
+     * 上游返回"每个 cell 的 shadowing 赢家"；我们只有单一优先级序列，所以
+     * 直接给注册顺序（已按 order 排过）。`sidebar` 的 apply 里第一句就调它。
+     */
+    entriesOfSlot(name) {
+      return byName.get(name) || [];
+    },
+    /** `entries(key)` —— 上游 SlotCore 的原始视图（含被遮蔽条目）。同 list()。 */
+    entries(name) {
       return byName.get(name) || [];
     },
     names() {
@@ -170,7 +196,24 @@ function createOwnerEmitter() {
  * present, `provide` becomes real and cross-plugin visible, and `set` writes
  * through to it — cordis treats `ctx.foo = v` as provide.
  */
-export function createPluginContext({ slots, services = null, table = {}, registry = null, owner = null, stack = null }) {
+/** cordis `Service.init` — a class plugin's post-construction hook. It is a
+ *  global symbol (`Symbol.for`), so we can honour it without importing cordis. */
+const SERVICE_INIT = Symbol.for('cordis.init');
+
+/**
+ * Mirror cordis' own `isConstructor`: *any* function carrying a prototype is
+ * instantiated with `new`, arrow functions (no prototype) are plain-called.
+ * Getting this wrong turns `class X extends Service` into a thrown
+ * "Class constructor cannot be invoked without 'new'".
+ */
+function isPluginClass(fn) {
+  if (typeof fn !== 'function' || !fn.prototype) return false;
+  if (fn instanceof (function* () {}).constructor) return false;
+  if (fn instanceof (async function* () {}).constructor) return false;
+  return true;
+}
+
+export function createPluginContext({ slots, services = null, table = {}, registry = null, owner = null, stack = null, onError = null }) {
   // services.get is already registry-aware (provided -> per-plugin base ->
   // shared -> stub), so this stays a one-line delegation.
   const resolve = (name) => {
@@ -191,6 +234,67 @@ export function createPluginContext({ slots, services = null, table = {}, regist
     return v;
   };
   const emitter = createOwnerEmitter();
+
+  /**
+   * cordis `ctx.plugin(sub, config)` — attach a *sub-plugin* to this context.
+   *
+   * This used to be a plain object (`{name:'dsh-native', version:'0.1.0'}`),
+   * which is why `tool` / `commands` / `input-trigger` / `model-selection`
+   * never rendered anything: their very first statement is
+   * `ctx.plugin(readToolview)`, and a metadata object is not callable, so apply
+   * threw before a single slot was registered.
+   *
+   * Semantics follow cordis' PluginRuntime: resolve function-or-`{apply}`,
+   * `new` class-shaped plugins (a cordis `Service` registers itself from its
+   * constructor), call the rest, and hand back a disposable fiber. A throwing
+   * sub-plugin is reported and swallowed — in cordis a failed fiber does not
+   * tear down its parent, and doing so here would lose the other three views
+   * a package registers.
+   */
+  function attachSubPlugin(sub, config) {
+    const callback = typeof sub === 'function'
+      ? sub
+      : (sub && typeof sub.apply === 'function' ? sub.apply : null);
+    if (!callback) {
+      throw new Error(`invalid plugin, expect function or object with an "apply" method, received ${typeof sub}`);
+    }
+    const name = sub.name || callback.name || 'anonymous';
+    let instance = null;
+    let out = null;
+    try {
+      if (isPluginClass(sub)) {
+        instance = new sub(ctx, config);
+        const init = instance?.[SERVICE_INIT];
+        if (typeof init === 'function') init.call(instance);
+      } else {
+        out = callback.call(ctx, ctx, config);
+      }
+    } catch (e) {
+      // Reported, not rethrown: see the note above about sibling fibers.
+      onError?.(e, `plugin:${name}`);
+    }
+    // A class plugin is torn down through its own dispose; a function plugin
+    // through whatever it returned. Either way the parent owns it now.
+    const handle = toDisposable(instance) ?? toDisposable(out);
+    if (handle) disposers.push(handle);
+    let disposed = false;
+    return {
+      name,
+      get disposed() { return disposed; },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        try { handle?.dispose?.(); } catch { /* keep the parent healthy */ }
+      },
+      // cordis returns a thenable fiber; `await ctx.plugin(x)` must not throw
+      // because the sub-plugin blew up (that error is already reported).
+      then(onFulfilled, onRejected) {
+        return Promise.resolve(instance ?? out).then(onFulfilled, onRejected);
+      },
+      catch(onRejected) { return Promise.resolve(instance ?? out).catch(onRejected); },
+      finally(onFinally) { return Promise.resolve(instance ?? out).finally(onFinally); },
+    };
+  }
 
   const own = {
     slots,
@@ -231,7 +335,7 @@ export function createPluginContext({ slots, services = null, table = {}, regist
       if (registry) registry.provide(name, value, owner);
       else table[name] = value;
     },
-    plugin: { name: 'dsh-native', version: '0.1.0' },
+    plugin: attachSubPlugin,
   };
   // `ctx.reflect.provide` is what several plugins actually call (uisfx). It is
   // the same operation under a different name, not a different concept.

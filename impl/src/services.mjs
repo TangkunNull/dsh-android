@@ -113,6 +113,28 @@ export function createServices({ slots, bus, dom, transport = null, bridge = nul
     set: () => {},
     save: () => Promise.resolve(),
   };
+  // `configForms.describe()` — the shared settings mirror's *describe face*.
+  // Three packages consume it (`settings-general`, `settings-models`,
+  // `plugin-manager`) and all of them only need `subscribe` / `ensure` /
+  // `getSnapshot`. Without it `ctx.configForms.describe()` threw a TypeError in
+  // the first line of apply(), so those three rendered nothing at all.
+  //
+  // There is no native settings document on the phone (no `settings.openSettings
+  // Document` backend), so the honest answer is an empty-but-valid view: no
+  // document, not writable, zero namespaces. That makes each consumer show its
+  // real "nothing configured yet" state instead of an error banner — and
+  // settings-models still lists providers, because those come from llm.*.
+  const NO_DOCUMENT_VIEW = Object.freeze({
+    hasDocument: false,
+    writable: false,
+    namespaces: Object.freeze([]),
+  });
+  const DESCRIBE_SNAPSHOT = Object.freeze({ view: NO_DOCUMENT_VIEW, error: null });
+  const describeFace = {
+    subscribe: () => () => {},
+    ensure: () => Promise.resolve(),
+    getSnapshot: () => DESCRIBE_SNAPSHOT,
+  };
   const configForms = {
     get: () => emptyForm,
     has: () => false,
@@ -121,6 +143,8 @@ export function createServices({ slots, bus, dom, transport = null, bridge = nul
     list: () => [],
     getSnapshot: () => EMPTY_FORM_SNAPSHOT,
     subscribe: () => () => {},
+    /** The describe face. Same object every call: uSES compares by reference. */
+    describe: () => describeFace,
     /** cordis helper: run `cb` now and again whenever the form is available. */
     whileServed: (_scopes, cb) => { try { return cb() || { dispose() {} }; } catch { return { dispose() {} }; } },
   };
@@ -142,7 +166,7 @@ export function createServices({ slots, bus, dom, transport = null, bridge = nul
     slots,
     locale: localeView,
     sessions,
-    conversation: { ...conversation, events: { register: () => ({ dispose() {} }), on: () => ({ dispose() {} }), emit() {} } },
+    conversation: { ...conversation, events: { register: () => ({ dispose() {} }), registerFallback: () => ({ dispose() {} }), on: () => ({ dispose() {} }), emit() {} } },
     remote,
     io: { fetch: hostFetch, on: () => ({ dispose() {} }) },
     theme,
@@ -154,7 +178,7 @@ export function createServices({ slots, bus, dom, transport = null, bridge = nul
       messages: [],
       send: () => Promise.resolve(null),
       subscribe: () => () => {},
-      events: { register: () => ({ dispose() {} }), on: () => ({ dispose() {} }), emit() {}, list: () => [] },
+      events: { register: () => ({ dispose() {} }), registerFallback: () => ({ dispose() {} }), on: () => ({ dispose() {} }), emit() {}, list: () => [] },
     },
     ui: { open: () => {}, close: () => {}, toast: () => {}, confirm: () => Promise.resolve(true) },
     configForms,

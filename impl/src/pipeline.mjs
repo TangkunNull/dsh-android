@@ -8,6 +8,7 @@ import { compileIR } from './compile.mjs';
 import { layoutIR } from './layout.mjs';
 import { pluginBoundary } from './errors.mjs';
 import { getActiveBus, setActiveBus, createMeasurementBus } from './measure.mjs';
+import { createSlotProps } from './host/slot-props.mjs';
 
 /** Render any React component to a styled IR tree. */
 export function renderComponent(Component, props = {}, { width = 390, height = 844, bus = null, rules = [] } = {}) {
@@ -41,6 +42,21 @@ const HOST_PROPS = new Set([
   '__ctx', 'ctx', 'children', 'key', 'ref', '__proto__', 'constructor', 'prototype',
 ]);
 
+/** 每个插件一份 props（196 个 hook 的快照必须稳定引用，见 slot-props.mjs）。 */
+const PROPS_CACHE = new WeakMap();
+
+function slotPropsFor(plugin) {
+  if (plugin && typeof plugin === 'object' && PROPS_CACHE.has(plugin)) return PROPS_CACHE.get(plugin);
+  const props = createSlotProps({
+    ctx: plugin?.ctx ?? null,
+    services: plugin?.serviceTable ?? null,
+    slots: plugin?.slots ?? null,
+    extra: { sessionId: 's' },
+  });
+  if (plugin && typeof plugin === 'object') PROPS_CACHE.set(plugin, props);
+  return props;
+}
+
 /** Render one slot entry from a loaded plugin. */
 export function renderSlot(plugin, slotName, props = {}, opts = {}) {
   // A disabled or unloaded plugin has no slot registry any more. Rendering the
@@ -49,6 +65,7 @@ export function renderSlot(plugin, slotName, props = {}, opts = {}) {
   if (!plugin?.slots) return { status: 'unloaded', slot: slotName, entries: 0 };
   const entries = plugin.slots.list(slotName);
   if (!entries.length) return { status: 'missing', slot: slotName, entries: 0 };
+  const base = slotPropsFor(plugin);
   const results = [];
   for (const entry of entries) {
     // Isolate every entry: a throwing component becomes a placeholder card, not
@@ -81,12 +98,16 @@ export function renderSlot(plugin, slotName, props = {}, opts = {}) {
       } catch { injected = {}; }   // an injector that throws contributes nothing
     }
     const out = renderComponent(Component, {
+      // base 先铺：t / renderSlot / 196 个 hook / 动作全都是 own property，
+      // 插件里 `{...props}` 展开时不会丢（Proxy 会丢，见 slot-props.mjs 注释）。
+      ...base,
       __ctx: ctx, ctx, sessionId: 's', slot: slotName, meta: entry.meta,
-      t: ctx.locale, locale: ctx.locale,
       getLang: ctx.locale?.getLang, subscribeLang: ctx.locale?.subscribe,
       // Plugin-manager slots are rendered per entry; give them the shape the
       // real host passes instead of leaving `subject` undefined.
       subject: props.subject || { kind: 'bundle', pkg: { name: plugin.id, version: plugin.pkg?.version || '0.0.0' } },
+      // inject 在 host props **之后**：`register({ inject: () => ({ t }) })` 是
+      // 插件把自己的命名空间 t 交给组件的方式，必须能覆盖宿主那份。
       ...injected,
       ...props,
     }, { rules: plugin.rules, bus: plugin.bus, ...opts });

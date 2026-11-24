@@ -174,18 +174,63 @@ export function createHostEnvironment({
     preloadModule() {}, preinit() {},
   };
 
-  const makeRequire = (pluginId) => (spec) => {
-    if (spec === 'react') return React;
-    if (spec === 'react-dom' || spec.startsWith('react-dom/')) return reactDom;
-    if (spec === 'react/jsx-runtime' || spec === 'react/jsx-dev-runtime') return nodeRequire(spec);
-    const ext = modules?.get(spec) || hostModule(spec);
-    if (ext) return ext;
-    if (spec.startsWith('@deepseek-ai/') || spec.startsWith('dsh-') || spec.startsWith('cordis') || spec === 'vue') {
-      return stubModule(spec);
+  /**
+   * 宿主的 require 表：先认宿主实现，再认**真 node_modules**，最后才给哑元。
+   *
+   * 第三档（真 node_modules）是这一轮补的。真实插件的 client 半边在模块顶层
+   * `require("zod")` / `require("@tanstack/react-virtual")`（12 个包这么做），
+   * 而旧表对任何不在 `hostModule()` 里的裸包名都直接抛 MODULE_NOT_FOUND ——
+   * 于是「包装了但加载失败」，原因却指向一个我们其实已经装好的包。
+   *
+   * 顺序不能反过来：`@deepseek-ai/dsh-client-ui-primitives` 在 node_modules 里
+   * 确实也存在（真包），但宿主表里的那个是**已知可用**的，先命中可以避免插件
+   * 拿到一份不同的实现。
+   */
+  const nativeCache = new Map();
+  const requireNative = (spec) => {
+    if (nativeCache.has(spec)) return nativeCache.get(spec);
+    let mod = null;
+    try {
+      mod = nodeRequire(spec);
+    } catch {
+      mod = null;
     }
-    const err = new Error(`MODULE_NOT_FOUND: ${spec} (required by ${pluginId})`);
-    err.code = 'MODULE_NOT_FOUND';
-    throw err;
+    nativeCache.set(spec, mod);
+    return mod;
+  };
+
+  const makeRequire = (pluginId) => {
+    const req = (spec) => {
+      if (spec === 'react') return React;
+      if (spec === 'react-dom' || spec.startsWith('react-dom/')) return reactDom;
+      if (spec === 'react/jsx-runtime' || spec === 'react/jsx-dev-runtime') return nodeRequire(spec);
+      const ext = modules?.get(spec) || hostModule(spec);
+      if (ext) return ext;
+      // 裸包名 → 真包。@deepseek-ai/ 与 cordis 不进来：那一层要么已被 hostModule
+      // 接管，要么需要用哑元兜底（真包在无宿主时会直接崩，见 host/index.mjs）。
+      if (!spec.startsWith('@deepseek-ai/') && !spec.startsWith('dsh-') && !spec.startsWith('cordis') && spec !== 'vue') {
+        const native = requireNative(spec);
+        if (native) return native;
+      }
+      if (spec.startsWith('@deepseek-ai/') || spec.startsWith('dsh-') || spec.startsWith('cordis') || spec === 'vue') {
+        return stubModule(spec);
+      }
+      const err = new Error(`MODULE_NOT_FOUND: ${spec} (required by ${pluginId})`);
+      err.code = 'MODULE_NOT_FOUND';
+      throw err;
+    };
+    /**
+     * `require.asset("plugins/…/running-whale.png")` —— 构建工具注入的静态资源
+     * 引用，返回资源 URL。我们用它的地方都是**字符串拼接进 CSS**（chat 的
+     * 鲸鱼 mask、settings-account 的头像），所以返回原路径就能让模块加载通过、
+     * 样式表照样生成；只是那张图在设备上取不到（资源打包是另一条线）。
+     *
+     * 之前没有它 → `require.asset is not a function` → chat 这个最大的插件在
+     * 模块顶层就挂了，连一个插槽都注册不上。
+     */
+    req.asset = (assetPath) => String(assetPath ?? '');
+    req.resolve = (spec) => hostModule(spec) ?? null;
+    return req;
   };
 
   /**

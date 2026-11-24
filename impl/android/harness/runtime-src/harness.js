@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 TangkunNull  https://github.com/TangkunNull/dsh-android
+// AGPL-3.0：可商用，但衍生必须开源；闭源商用需取得授权，见 COMMERCIAL.md。
+
 // Harness 入口，由 libnode 在 `:harness` 进程里跑。
 //
 // 职责（就这些，别的都别塞进来）：
@@ -91,6 +95,53 @@ async function startDsh(profile) {
   if (!gateway) throw new Error('dsh profile did not provide typertGateway');
   if (!connection) throw new Error('dsh profile did not provide connection');
   return { ...runtime, gateway, connection };
+}
+
+/**
+ * 插件装配统计。
+ *
+ * cordis 只在**失败**时打日志（"N entries did not activate"），成功时一声不响。
+ * 结果就是"日志里没有插件行"很容易被读成"插件压根没加载"—— 0.1.15 真机报告
+ * 里就是这样：13 个插件 import 成功，但报告里看不到任何加载痕迹。
+ *
+ * 这一行把事实写死：注册了多少插件、多少 fiber 在 active、多少还 pending
+ * （依赖未满足，是这个 profile 的设计内状态，不是故障）。
+ *
+ * 注意 **failed 桶通常是空的，这并不代表没有失败**：import 抛错的行会被 cordis
+ * 从 registry 里整个移除（既不 active 也不 failed），失败只体现在加载器上面那行
+ * `dsh: warning: N entries did not activate` 以及紧随其后的 import 堆栈。
+ * 所以两行要一起看：`plugins` 行回答"装上了多少"，warning 行回答"掉了几个"。
+ *
+ * FiberState 是 cordis 的 `const enum`（编译期内联成数字），运行时取不到名字，
+ * 这里按源码声明顺序硬编码：PENDING=0 LOADING=1 ACTIVE=2 FAILED=3
+ * DISPOSED=4 UNLOADING=5。
+ */
+function pluginSummary(ctx) {
+  const registry = ctx && ctx.registry;
+  if (!registry || typeof registry.forEach !== 'function') {
+    return { error: 'ctx.registry unavailable' };
+  }
+  const STATE = ['pending', 'loading', 'active', 'failed', 'disposed', 'unloading'];
+  const count = Object.create(null);
+  const failed = [];
+  let fibers = 0;
+
+  registry.forEach((runtime) => {
+    const list = runtime && runtime.fibers;
+    if (!list) return;
+    for (const fiber of list) {
+      fibers += 1;
+      const name = STATE[fiber.state] || `unknown(${fiber.state})`;
+      count[name] = (count[name] || 0) + 1;
+      if (name === 'failed') failed.push(runtime.name || '(anonymous)');
+    }
+  });
+
+  const summary = { plugins: registry.size, fibers };
+  // 只报非零的桶：一行日志里出现 pending: 0 是噪音。
+  for (const k of STATE) if (count[k]) summary[k] = count[k];
+  if (failed.length) summary.failedNames = failed.slice(0, 12);
+  return summary;
 }
 
 async function main() {
@@ -198,9 +249,12 @@ async function main() {
   }
 
   try {
+    const bootT0 = Date.now();
     runtime = await startDsh(profile);
     server.attachGateway({ gateway: runtime.gateway, connection: runtime.connection });
-    log('dsh attached', { profile, transport: server.transportKind });
+    log('dsh attached', { profile, transport: server.transportKind, ms: Date.now() - bootT0 });
+    // 成功装配也要留一行：没有这行，"插件全挂"和"插件全好"在日志里长得一样。
+    log('plugins', pluginSummary(runtime.ctx));
   } catch (e) {
     // 不退出：bridge 还活着，Flutter 会收到一条 backend-unavailable，
     // harness.log 里留下完整栈。

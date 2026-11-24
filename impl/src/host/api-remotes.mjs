@@ -138,18 +138,31 @@ function stableKey(v) {
  */
 export function createRemoteNamespace(transport, { prefix = '', onMissing = null } = {}) {
   // No transport is a normal state (offline, or a plugin host without a link
-  // yet), not an error: plugins call `ctx.remote.*` from effects during render,
-  // so rejecting here becomes an unhandled rejection and takes the whole host
-  // process down. Degrade to "no data" and record it — the same posture as
-  // unknown services elsewhere in this tree.
+  // yet), so this must not reject: plugins call `ctx.remote.*` from effects, and
+  // a rejection there is an unhandled rejection that takes the host down.
+  //
+  // It must not resolve to `null` either. The wire contract is
+  // `RpcResult = {ok,value} | {ok,error}`, and every consumer starts with
+  // `if (!result.ok)`. Resolving `null` therefore doesn't degrade to "no data",
+  // it throws `Cannot read properties of null (reading 'ok')` inside the plugin
+  // — that is exactly how `ui-cordis` (inventory) and `settings-models`
+  // (listProviders) died. A well-formed failure is handled by the code that is
+  // already there, because it is what the real wire returns when a call fails.
   let missingReported = false;
+  const offline = (method) => ({
+    ok: false,
+    error: {
+      code: 'NO_TRANSPORT',
+      message: `no transport for remote.${method || 'call'} (host link is not established)`,
+    },
+  });
   const call = (method, payload, opts) => {
     if (!transport) {
       if (!missingReported) {
         missingReported = true;
         onMissing?.(method);
       }
-      return Promise.resolve(null);
+      return Promise.resolve(offline(method));
     }
     return transport.call(method, payload ?? {}, opts);
   };

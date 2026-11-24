@@ -9,6 +9,7 @@ import { createServices } from './services.mjs';
 import { createHostEnvironment } from './loader.mjs';
 import { collectCss, parseCss } from './css.mjs';
 import { createMeasurementBus } from './measure.mjs';
+import { withCrashGuard, withCrashGuardSync } from './crash-guard.mjs';
 
 // Capability probe on the *source*, not a runtime trace: a plugin that never
 // calls fillRect in this session still needs the canvas bridge tomorrow.
@@ -38,13 +39,48 @@ export function detectCaps(code) {
 // surfaced as "plugin did not register".
 const ESM_SYNTAX = /^\s*(?:import\s+[\w{*'"]|import\s*\{|export\s+(?:default|async\s+function|function\*?|const|let|var|class|\{))/m;
 
+/**
+ * Resolve a plugin's *client* entry point.
+ *
+ * Published plugins do not put `client.js` at the package root: they declare
+ * `exports["./client"]` -> `./lib/client.js` and keep the host half at
+ * `lib/index.js`. Without the `exports` branch every real package resolved to a
+ * nonexistent `<dir>/client.js` and failed with "missing ...", which looked
+ * like a plugin bug.
+ *
+ * The manifest is not trusted blindly: `impl/fixtures/dsh-windows-mcp` (a real
+ * published package, flattened for the bench) declares `./lib/client.js` while
+ * shipping `client.js` at the root. Candidates are therefore tried in order of
+ * confidence and the first existing file wins — a manifest that lies is a
+ * reason to look elsewhere, not a reason to refuse to load.
+ */
 function entryOf(dir, entry = null) {
   if (entry) return join(dir, entry);
+  const candidates = [];
   try {
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    if (pkg.entry) return join(dir, pkg.entry);
+    if (pkg.entry) candidates.push(pkg.entry);
+    const exported = pkg.exports?.['./client'];
+    if (typeof exported === 'string') {
+      candidates.push(exported);
+    } else if (exported && typeof exported === 'object') {
+      // Bundlers emit `{ import, require, default }`; `default` first because
+      // that is the branch every loader resolves to.
+      for (const key of ['default', 'require', 'import']) {
+        if (typeof exported[key] === 'string') candidates.push(exported[key]);
+      }
+    }
   } catch { /* no manifest */ }
-  return join(dir, 'client.js');
+  // 约定位置放最后，但一定要有：没有任何声明时它就是唯一答案。
+  candidates.push('client.js');
+
+  for (const rel of candidates) {
+    const full = join(dir, rel);
+    if (existsSync(full)) return full;
+  }
+  // 一个都不存在：报第一个候选，让错误指向 manifest 声称的位置而不是"约定的"
+  // 那个 —— 后者会把"包本身是坏的"说成"路径不对"。
+  return join(dir, candidates[0]);
 }
 
 export function isEsmPlugin(dir, entry = null) {
@@ -114,34 +150,50 @@ async function loadEsmUnlocked(dir, opts = {}) {
 
   try {
     registerHostModules();
-    const mod = await import(`${pathToFileURL(clientPath).href}?dsh=${Date.now()}`);
-    const exports = mod.default ?? mod;
-    const ctx = createPluginContext({ slots, services: serviceTable, registry, owner: id, stack });
-    const apply = exports?.apply || (typeof exports === 'function' ? exports : null);
-    // apply() gets its own try: falling into the outer catch marked the stage
-    // as "import" and threw away ctx/slots, which turned one plugin's throw
-    // into a null ctx for every downstream reader.
-    let applyResult = null;
-    if (apply) {
-      try {
-        const out = apply(ctx);
-        applyResult = out ?? null;
-        if (out && typeof out.catch === 'function') out.catch((e) => errors.push({ stage: 'apply:async', message: e.message, stack: e.stack }));
-      } catch (e) {
-        errors.push({ stage: 'apply', message: e.message, stack: e.stack });
+    // 整个 import + apply 过程套在归因窗口里：apply 之后由微任务/定时器抛的错
+    // 会杀掉 node（open-in-app 就是这样），而那条错误在栈里带这个插件的路径，
+    // 所以能准确归到它头上，同时不影响宿主自己的异常语义（见 crash-guard.mjs）。
+    const stage = { value: 'import' };
+    return await withCrashGuard({
+      label: id, dirs: [dir, clientPath], errors,
+      stage: () => stage.value,
+    }, async () => {
+      const mod = await import(`${pathToFileURL(clientPath).href}?dsh=${Date.now()}`);
+      const exports = mod.default ?? mod;
+      const ctx = createPluginContext({
+        slots, services: serviceTable, registry, owner: id, stack,
+        // A sub-plugin attached via ctx.plugin() that throws must be attributed
+        // to this package, not silently dropped — otherwise "no content" has no
+        // explanation in the scan report.
+        onError: (e, label) => errors.push({ stage: label, message: e.message, stack: e.stack }),
+      });
+      const apply = exports?.apply || (typeof exports === 'function' ? exports : null);
+      // apply() gets its own try: falling into the outer catch marked the stage
+      // as "import" and threw away ctx/slots, which turned one plugin's throw
+      // into a null ctx for every downstream reader.
+      let applyResult = null;
+      if (apply) {
+        stage.value = 'apply';
+        try {
+          const out = apply(ctx);
+          applyResult = out ?? null;
+          if (out && typeof out.catch === 'function') out.catch((e) => errors.push({ stage: 'apply:async', message: e.message, stack: e.stack }));
+        } catch (e) {
+          errors.push({ stage: 'apply', message: e.message, stack: e.stack });
+        }
       }
-    }
-    const css = collectCss(env.document);
-    return {
-      id, pkg, env, exports, slots, ctx, css, rules: parseCss(css), errors, bus: measureBus,
-      caps: detectCaps(readFileSync(clientPath, 'utf8') + css),
-      inject: Array.isArray(exports?.inject) ? [...exports.inject] : [],
-      optional: Array.isArray(exports?.optional) ? [...exports.optional] : [],
-      provides: Array.isArray(exports?.provides) ? [...exports.provides] : [],
-      missingServices: serviceTable.missing(),
-      applyResult, stack, serviceTable,
-      format: 'esm',
-    };
+      const css = collectCss(env.document);
+      return {
+        id, pkg, env, exports, slots, ctx, css, rules: parseCss(css), errors, bus: measureBus,
+        caps: detectCaps(readFileSync(clientPath, 'utf8') + css),
+        inject: Array.isArray(exports?.inject) ? [...exports.inject] : [],
+        optional: Array.isArray(exports?.optional) ? [...exports.optional] : [],
+        provides: Array.isArray(exports?.provides) ? [...exports.provides] : [],
+        missingServices: serviceTable.missing(),
+        applyResult, stack, serviceTable,
+        format: 'esm',
+      };
+    });
   } catch (e) {
     errors.push({ stage: 'import', message: e.message, stack: e.stack });
     return {
@@ -185,27 +237,38 @@ export function loadPlugin(dir, { services = {}, bus = null, entry = null, host 
   serviceTable.base.dom = env.document;
   serviceTable.local.dom = env.document;
 
-  env.runScript(code, `${id}/client.js`);
-  const exports = env.loader.get(id);
+  // classic 插件是同步的，所以窗口用同步版：`env.runScript` 与 `apply` 都套在里面，
+  // 监听器在返回后的一个宏任务里摘掉 —— apply 里 `setTimeout(fn, 0)` 抛的错正好
+  // 落在这一拍里（同一个类问题，另一条装载路径）。
+  let exports = null;
+  withCrashGuardSync({ label: id, dirs: [dir, clientPath], errors, stage: 'factory' }, () => {
+    env.runScript(code, `${id}/client.js`);
+    exports = env.loader.get(id);
+  });
   if (!exports) throw new Error(`plugin did not register under "${id}" (saw: ${[...env.loader.ids()].join(',') || 'none'})`);
   if (exports.__error) throw exports.__error;
 
-  const ctx = createPluginContext({ slots, services: serviceTable, registry, owner: id, stack });
+  const ctx = createPluginContext({
+    slots, services: serviceTable, registry, owner: id, stack,
+    onError: (e, label) => errors.push({ stage: label, message: e.message, stack: e.stack }),
+  });
   let applyResult = null;
-  try {
+  withCrashGuardSync({ label: id, dirs: [dir, clientPath], errors, stage: 'apply' }, () => {
     const apply = exports.apply || exports.default?.apply || exports.default;
-    const out = typeof apply === 'function' ? apply(ctx)
-      : typeof exports === 'function' ? exports(ctx)
-        : null;
-    applyResult = out ?? null;
-    // apply() is often async. A rejection here used to become an unhandled
-    // rejection and take the whole process down; now it is a recorded error.
-    if (out && typeof out.catch === 'function') {
-      out.catch((e) => errors.push({ stage: 'apply:async', message: e.message, stack: e.stack }));
+    try {
+      const out = typeof apply === 'function' ? apply(ctx)
+        : typeof exports === 'function' ? exports(ctx)
+          : null;
+      applyResult = out ?? null;
+      // apply() is often async. A rejection here used to become an unhandled
+      // rejection and take the whole process down; now it is a recorded error.
+      if (out && typeof out.catch === 'function') {
+        out.catch((e) => errors.push({ stage: 'apply:async', message: e.message, stack: e.stack }));
+      }
+    } catch (e) {
+      errors.push({ stage: 'apply', message: e.message, stack: e.stack });
     }
-  } catch (e) {
-    errors.push({ stage: 'apply', message: e.message, stack: e.stack });
-  }
+  });
 
   const css = collectCss(env.document);
   const rules = parseCss(css);

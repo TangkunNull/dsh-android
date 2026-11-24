@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
+  "license": "(AGPL-3.0-only OR LicenseRef-Commercial)",
   "description": "dsh client-half host: module loader + React reconciler emitting widget IR",
   "scripts": {
     "probe": "node tools/probe.mjs",
@@ -10,16 +11,59 @@
     "probe:suite": "node tools/probe-suite.mjs",
     "probe:inproc": "node tools/probe-inproc.mjs",
     "test": "node --test tools/*.test.mjs",
-    "layout": "node tools/layout.mjs"
+    "layout": "node tools/layout.mjs",
+    "corpus": "node tools/install-scan-corpus.mjs",
+    "scan": "node tools/scan-plugins.mjs",
+    "hooks": "node tools/extract-hooks.mjs"
   },
   "dependencies": {
-    "react": "^19.3.1",
-    "react-reconciler": "^0.34.0",
-    "scheduler": "^0.27.0",
-    "yoga-layout": "^3.2.1"
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/cosmokit": "1.9.0",
+    "@deepseek-ai/dsh-client-schema-form": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.0.1-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "@shikijs/langs": "4.6.0",
+    "@tanstack/react-virtual": "3.14.10",
+    "anser": "2.3.5",
+    "clsx": "2.1.1",
+    "immer": "10.2.0",
+    "katex": "0.16.47",
+    "mdast-util-from-markdown": "2.1.0",
+    "mdast-util-gfm": "3.1.0",
+    "mdast-util-math": "3.0.0",
+    "micromark-core-commonmark": "2.0.4",
+    "micromark-extension-gfm": "3.0.0",
+    "micromark-extension-math": "3.1.0",
+    "micromark-factory-space": "2.1.0",
+    "micromark-util-character": "2.1.1",
+    "micromark-util-classify-character": "2.0.1",
+    "micromark-util-sanitize-uri": "2.0.1",
+    "micromark-util-symbol": "2.0.1",
+    "react": "19.3.1",
+    "react-reconciler": "0.34.0",
+    "scheduler": "0.27.0",
+    "shiki": "4.6.0",
+    "yoga-layout": "3.2.1",
+    "zod": "4.4.3",
+    "zustand": "4.4.7"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-sandbox": "0.2.2-rc.1",
-    "ws": "^8.23.0"
+    "ws": "8.23.0"
+  },
+  "overrides": {
+    "react": "$react",
+    "react-dom": "$react"
+  },
+  "_notes": {
+    "为什么依赖是精确版本": "这个包不进 npm 分发，它是宿主运行时的一部分。任何 ^ 都会让「今天能跑」和「下个月能跑」变成两个不同的运行时，而差异只会以「某个插件渲染出空白」的形式出现在设备上。",
+    "为什么用 legacy-peer-deps": "见 .npmrc。@deepseek-ai/dsh-client-ui-primitives 声明 peer react ^18.2.0，而我们的 reconciler 绑在 react 19（react-reconciler 0.34 只支持 19）。primitives 的 100 个组件在 19 下实测正常（只用到 createElement/hooks 那一层），所以忽略这个 peer 冲突，而不是为一个声明降级宿主。",
+    "为什么有 @deepseek-ai/dsh-client-runtime": "下一轮的地基：它是上游完整的客户端运行时（SlotsService / defineStore / SessionsService…），零 document 引用，能在 Node 里跑。这一轮先固化进清单，避免再被 npm i 清掉。",
+    "为什么有 @deepseek-ai/dsh-client-runtime（却不在 dependencies）": "它已发布（0.0.1-rc.1），但它声明了 15 个宿主包依赖，其中 @deepseek-ai/dsh-compact@^0.0.1-rc.1 在 npm 上根本不存在（registry.npmjs.org 与镜像都 404，上游漏发）。把它写进 dependencies 会让整条 `npm i` 直接失败 —— 一个包的错误依赖能杀掉整个安装。所以它改由 tools/install-scan-corpus.mjs 的 pinned 路径恢复（npm pack 只取 tarball，不解析依赖）。",
+    "为什么有 zod / @tanstack/react-virtual": "12 个已发布插件的 client 半边在模块顶层 require 它们，缺了就是 MODULE_NOT_FOUND 整包装载失败。版本取插件自己声明的那个（zod 4.4.3、react-virtual 3.14.10），不是 registry 最新版 —— 插件是按这些 API 编的（z.record(k, v)、z.json() 都是 zod 4 才有的）。",
+    "扫描语料不在这个清单里": "60 个 dsh-client-ui-* 插件是测试语料，不是运行时依赖。它们的固定版本在 tools/scan-corpus.json，用 `npm run corpus` 装回（--no-save，不污染清单）。",
+    "为什么 override react-dom": "primitives 把 react-dom ^18.2.0 声明成 dependencies（不是 peer），而 @tanstack/react-virtual 的 CJS 产物会 require(\"react-dom\")。宿主是 react 19，混进一份 18.x 的 react-dom 会在 require 时就抛 \"Cannot read properties of undefined (reading ReactCurrentDispatcher)\"（react-dom 18 要读 react 18 的 internals）。我们自己的门户/根渲染根本不走真 react-dom（src/shims/react-dom.mjs + loader 的 reactDom 替身），所以把 react-dom 统一钉到 react 的版本最省事。",
+    "为什么有 zustand / immer": "@deepseek-ai/dsh-client-runtime 的运行时依赖（它自己的 defineStore 建在 zustand 上）。client 半边闭包只收物理位于 impl/node_modules 的包，所以这两个必须真装 —— 否则下一轮设备上 import runtime 会断在 zustand 上。"
   }
 }

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 TangkunNull  https://github.com/TangkunNull/dsh-android
+// AGPL-3.0：可商用，但衍生必须开源；闭源商用需取得授权，见 COMMERCIAL.md。
+
 // 同进程 transport：Flutter 侧和 dsh 都在同一个 libnode 实例里，所以「上行」不需要
 // 再绕一圈 http://127.0.0.1:7020 —— 那是进程内自己给自己发网络包，多一个端口、
 // 一个 launch token、一套 cookie、一份故障模式。

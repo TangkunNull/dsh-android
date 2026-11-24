@@ -34,6 +34,8 @@
 //   S->C  {"t":"models","v":["..."]}
 //   S->C  {"t":"sessions","v":[...],"id":7}
 //   S->C  {"t":"ack","id":7}                        command accepted
+//   C->S  {"t":"slots","id":n,"names"?:["..."]}    导出已装插件的插槽 UI
+//   S->C  {"t":"slots","id":n,"v":{plugin:"runtime",slots,errors,stats,packages}}
 //   S->C  {"t":"error","id":7,"code":"...","message":"..."}
 //
 // 后端有两种接法（见 createBridgeServer 的 gateway/connection 参数）：
@@ -47,10 +49,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 
 import { createSessionLink } from './protocol/session-link.mjs';
 import { createInprocTransport } from './protocol/transport-inproc.mjs';
+import { exportInstalledSlots, SLOTS_EXPORT_TIMEOUT_MS } from './slot-export.mjs';
 
 export const PROTO = 1;
 
@@ -174,6 +178,10 @@ export function createBridgeServer(opts = {}) {
     handshakeTimeoutMs = 5_000,
     maxQueuedBytes = 8 * 1024 * 1024,
     maxLineBytes = 4 * 1024 * 1024,
+    /** `slots` 命令的导出硬超时；测试把它调短。 */
+    slotsTimeoutMs = SLOTS_EXPORT_TIMEOUT_MS,
+    /** `slots` 的导出本体，测试注入假实现来钉住桥自身的合并/缓存契约。 */
+    exportSlotsImpl = exportInstalledSlots,
     onLog = () => {},
   } = opts;
 
@@ -187,6 +195,111 @@ export function createBridgeServer(opts = {}) {
   /// 用 Map 而不是 WeakMap：客户端断开时必须能遍历它把进程收掉，而 WeakMap
   /// 拿不到 key 列表。代价是「忘了删」会泄漏 —— 断开路径已经显式 delete。
   const terminals = new Map();
+
+  /// 进行中的插件安装：`requestId -> { startedAt, promise, settled, result }`。
+  ///
+  /// 这里必须由桥自己持有 promise，不能靠 `pluginManager/waitForInstall` 代劳：
+  /// 那个方法的文档写得很清楚 —— "Completed results are not retained"，装完就
+  /// 删了。响应慢的安装（pnpm 下载 + 脚本）在 Flutter 侧一次 20 秒超时之后已经
+  /// 没人等它了，只有桥记着，用户回来才问得出结果。
+  const installs = new Map();
+
+  // ---- 插件 UI 导出（`slots` 命令）---------------------------------------
+  //
+  // 导出一次要 loadPlugin 60 个包，几秒到十几秒，而结果只随「装了什么」变化。
+  // 所以结果进程内缓存：key = runtime buildId + 已装包版本列表，第二次请求直接
+  // 返回。任何改变插件集合/启停状态的动作（install / remove / 两个 enable 开关）
+  // 都把缓存作废 —— 启停改变了导出的输入（停用的包不再导出），不复废就会把
+  // 旧界面留到下次重启。
+  let slotsCache = null;   // { key, value, at }
+  let slotsJob = null;     // { key, promise }：并发请求合并到同一次导出
+
+  /** 当前 runtime 的 buildId（runtime.json 在解包目录根部）。读不到（桌面直跑
+   *  桥的测试）返回 null，key 退化为「已装包版本列表」，缓存仍然正确 —— 只是
+   *  少了一层「闭包换版也作废」的保险。 */
+  function runtimeBuildId() {
+    try {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const harnessDir = process.env.DSH_HARNESS_DIR || path.join(here, '..', '..');
+      const file = path.join(harnessDir, 'runtime.json');
+      if (!fs.existsSync(file)) return null;
+      const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return typeof json.buildId === 'string' ? json.buildId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 缓存 key：buildId + 每个包的 (名字, 版本, 安装态, 启用态, 可用性)。 */
+  function slotsCacheKey(bundles) {
+    const rows = (Array.isArray(bundles) ? bundles : [])
+      .map((b) => [b?.name, b?.version ?? null, b?.installed === true, b?.enabled === true, b?.availability ?? null]);
+    return JSON.stringify([runtimeBuildId(), rows]);
+  }
+
+  function invalidateSlotsCache() {
+    slotsCache = null;
+    slotsJob = null;
+  }
+
+  /**
+   * 处理 `slots` 命令。
+   *
+   * 挂 whenGateway 的理由与 `plugins` 一致：listBundles 是 profile 服务，后端
+   * attach 之前不存在。导出本体在 `slot-export.mjs`（warmRealHostModules →
+   * loadPluginAsync → exportSlots），这里只管缓存、合并请求与回包。
+   *
+   * `msg.names`（string 数组）只导指定包，是调试用的旁路 —— 带过滤的结果**不进
+   * 缓存**：半份结果一旦留在缓存里，全量请求也会命中它。
+   */
+  function handleSlots(client, msg, id) {
+    const names = Array.isArray(msg.names)
+      ? msg.names.filter((n) => typeof n === 'string')
+      : null;
+
+    whenGateway(async (l) => {
+      const bundles = await pmCall(l, 'listBundles', {});
+      const key = slotsCacheKey(bundles);
+
+      if (names === null && slotsCache && slotsCache.key === key) {
+        // 命中：浅克隆一份并在 stats 上标注，让调用方能区分冷/热路径。
+        const hit = slotsCache.value;
+        onLog('slots cache hit', { key: key.length, at: slotsCache.at });
+        return {
+          ...hit,
+          stats: { ...hit.stats, cache: 'hit' },
+        };
+      }
+      if (names === null && slotsJob && slotsJob.key === key) {
+        return slotsJob.promise; // 两个客户端同时要：共享同一次导出
+      }
+
+      // Promise.resolve 包一层：导出本体是 async，但注入的假实现（测试）可能
+      // 直接返回普通对象 —— 不包就抛 ".then is not a function"。
+      const promise = Promise.resolve()
+        .then(() => exportSlotsImpl({
+          bundles,
+          names,
+          timeoutMs: slotsTimeoutMs,
+        }))
+        .then((value) => {
+        if (names === null) slotsCache = { key, value, at: Date.now() };
+        return value;
+      });
+      if (names === null) slotsJob = { key, promise };
+      // 失败时也要把 job 摘掉，否则下一个请求会 await 一个已拒绝的 promise。
+      const guarded = promise.catch((e) => {
+        if (slotsJob && slotsJob.promise === promise) slotsJob = null;
+        throw e;
+      });
+      return guarded;
+    })
+      .then((v) => send(client, { t: 'slots', id, v }))
+      .catch((e) => send(client, {
+        t: 'error', id, code: e?.code || 'slots', message: e?.message || String(e),
+      }));
+  }
+
   const stats = {
     connections: 0,
     rejected: 0,
@@ -206,6 +319,51 @@ export function createBridgeServer(opts = {}) {
   let inproc = initialGateway && initialConnection
     ? { gateway: initialGateway, connection: initialConnection }
     : null;
+
+  // ---- 等后端就绪 --------------------------------------------------------
+  //
+  // 真机上 UI 比 dsh 早到：socket 一 listening，Flutter 立刻发 `sessions`，而
+  // dsh 还要 boot 十几秒。这段时间 chooseTransport() 拿不到 inproc，只能退回
+  // HTTP —— Android 上没有 127.0.0.1:7020 那个服务，于是首屏直接吃一个
+  // `fetch failed`，并且 Flutter 侧不会重试，侧栏就永久停在错误态。
+  //
+  // 所以凡是走 gateway 的命令先等 attach：晚十秒拿到数据，好过立刻报一个假错。
+  let gatewayReadyResolve;
+  let gatewayReadyReject;
+  const gatewayReady = new Promise((resolve, reject) => {
+    gatewayReadyResolve = resolve;
+    gatewayReadyReject = reject;
+  });
+  // 没有 await 者时提前 reject 会变成 unhandledRejection，先挂一个空处理器。
+  gatewayReady.catch(() => {});
+  // 只有「用默认链路 + 没给外部后端地址」才需要等 attach：
+  //   - 宿主注入 createLink（测试、嵌入式）→ 链路由它自己起，等 attach 是白等
+  //   - 给了 baseUrl / transport           → 直连已有后端，与 attach 无关
+  // 判错的代价很具体：真机首屏多等十几秒，或测试里每条命令陪跑到 120 秒超时。
+  const waitsForGateway = createLink === createSessionLink
+    && !inproc
+    && !linkOptions.transport
+    && !linkOptions.baseUrl;
+  if (!waitsForGateway) gatewayReadyResolve();
+
+  const GATEWAY_WAIT_MS = 120_000;
+
+  function awaitGateway() {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(Object.assign(new Error('后端仍在启动，稍后重试'), { code: 'backend-not-ready' }));
+      }, GATEWAY_WAIT_MS);
+    });
+    return Promise.race([gatewayReady, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /** 等到 dsh 接上之后再取 link —— attach 时旧 link 会被丢掉重建。 */
+  function whenGateway(fn) {
+    return Promise.resolve()
+      .then(awaitGateway)
+      .then(() => fn(ensureLink()));
+  }
 
   // ---- 载体的选择 --------------------------------------------------------
   //
@@ -278,6 +436,9 @@ export function createBridgeServer(opts = {}) {
       return false;
     }
     inproc = { gateway, connection };
+    // 先放行等待者，再重建 link：whenGateway 醒来后调 ensureLink()，拿到的就是
+    // 下面这份 inproc 载体，不会先用 HTTP 建一次再被替换。
+    gatewayReadyResolve();
     if (link) {
       const old = link;
       link = null;
@@ -293,6 +454,9 @@ export function createBridgeServer(opts = {}) {
   function notifyBackendFailure(error) {
     const message = error?.message ? String(error.message) : String(error);
     onLog('backend unavailable', { message });
+    // 等待中的命令直接失败，不必陪跑到 120 秒超时 —— 用户这时候需要的是
+    // 「后端没起来」这句话，不是转圈。
+    gatewayReadyReject(Object.assign(new Error(message), { code: 'backend-unavailable' }));
     broadcast({ t: 'error', code: 'backend-unavailable', message });
   }
 
@@ -441,6 +605,360 @@ export function createBridgeServer(opts = {}) {
       clients.delete(client);
       onLog('client closed', { remaining: clients.size, terminals: owned ? owned.size : 0 });
     });
+  }
+
+  // ---- 插件管理 ----------------------------------------------------------
+  //
+  // 为什么不直接让界面用通用 `rpc` 打 `pluginManager/*`：
+  //
+  //   1. `installBundle` 是**同步等待整个 pnpm 过程**的（它 await 到底再返回
+  //      ChangeResult）。用 `rpc` 发出去，Flutter 侧的 20 秒超时一到就没人等
+  //      这个答复了 —— 安装其实还在跑，界面却只能报「超时」。所以长任务必须
+  //      由桥记住 requestId，界面按 id 轮询。
+  //   2. `listBundles` 单次回 378 KB（`rows` 里每个组件带 8 种语言的 meta），
+  //      手机上没人渲染得了。桥在这里只挑界面真要用的字段，顺带把
+  //      `listPlugins` 的运行态按 entryId 并进 bundle，省掉界面的第二次请求和
+  //      自己 join 的代码。
+  //   3. 错误码来自 `ManagementFailure`（`invalid-spec` / `not-bundle` /
+  //      `incompatible-version` …），这些是给用户看的，必须原样透传而不是被
+  //      `rpc` 折成一句 "rpc failed"。
+
+  /** `transport.call` 统一成「返回 value 或抛出带 code 的 Error」。 */
+  function pmCall(l, method, args) {
+    return l.transport.call(`pluginManager.${method}`, args ?? {}).then((r) => {
+      if (!r?.ok) {
+        const e = new Error(r?.error?.message || `pluginManager.${method} failed`);
+        e.code = r?.error?.code || 'plugin-manager';
+        throw e;
+      }
+      return r.value ?? null;
+    });
+  }
+
+  /** `meta.title` 可以是字符串，也可以是 `{zh, en, …}`。挑中文，退英文，退第一个。 */
+  function pickText(value) {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return '';
+    for (const key of ['zh', 'zh-CN', 'en']) {
+      if (typeof value[key] === 'string') return value[key];
+    }
+    const first = Object.values(value).find((v) => typeof v === 'string');
+    return typeof first === 'string' ? first : '';
+  }
+
+  /** 组件的运行态：`active` 才算跑着，`pending`/`loading` 归到「已停用」。 */
+  function partState(plugin) {
+    if (!plugin || plugin.enabled === false) return 'off';
+    if (plugin.fiberPhase === 'failed') return 'failed';
+    if (plugin.fiberPhase === 'active') return 'running';
+    return 'off';
+  }
+
+  /**
+   * 把 `listBundles` + `listPlugins` 合成界面要的那一份。
+   *
+   * @param {Array} bundles `listBundles` 的原样结果
+   * @param {Array} plugins `listPlugins` 的原样结果
+   * @param {boolean} withParts 详情页要组件清单；列表只要计数
+   */
+  function joinCatalog(bundles, plugins, { withParts = false } = {}) {
+    const byEntry = new Map((plugins || []).map((p) => [p.entryId, p]));
+    return (bundles || []).map((b) => {
+      const rows = Array.isArray(b.rows) ? b.rows : [];
+      const counts = { total: rows.length, running: 0, failed: 0, off: 0 };
+      const parts = rows.map((row) => {
+        const live = byEntry.get(row.entryId);
+        const state = partState(live);
+        counts[state] += 1;
+        const part = {
+          entryId: row.entryId,
+          moduleName: row.moduleName,
+          title: pickText(row.meta?.title) || row.moduleName || row.entryId,
+          // 关掉的组件也要能再打开，所以要 id；`plugin-manager` 侧的
+          // `setPluginEnabled(id, …)` 认的就是 rowId。
+          id: row.rowId ?? null,
+          enabled: state !== 'off',
+          state,
+        };
+        if (withParts) {
+          part.description = pickText(row.meta?.description);
+          part.readOnlyReason = live?.readOnlyReason ?? null;
+        }
+        return part;
+      });
+
+      const out = {
+        name: b.name,
+        title: pickText(b.meta?.title) || b.name,
+        description: pickText(b.meta?.description) || b.description || '',
+        version: b.version ?? null,
+        official: b.official === true,
+        // `profile` = profile 自己声明的依赖；`installation` = 随 DSH 安装；
+        // `missing` = 声明了但文件读不到（界面必须区别于「未安装」）。
+        availability: b.availability ?? 'missing',
+        enabled: b.enabled === true,
+        installed: b.installed === true,
+        optional: b.optional === true,
+        removable: b.removable === true,
+        readOnlyReason: b.readOnlyReason ?? null,
+        listedByDefault: b.listedByDefault !== false,
+        source: b.source ?? null,
+        metaError: typeof b.meta?.error === 'string' ? b.meta.error : null,
+        parts: counts,
+      };
+      if (withParts) out.partList = parts;
+      return out;
+    });
+  }
+
+  /** ChangeResult → 帧里的样子。`packageResult.output` 只留尾巴，整段可能几 MB。 */
+  function trimChangeResult(result) {
+    if (!result || typeof result !== 'object') return result ?? null;
+    const out = {
+      changed: result.changed === true,
+      application: result.application ?? null,
+      stage: result.stage ?? null,
+      target: result.target ?? null,
+      enabled: result.enabled ?? null,
+      restartReason: result.restartReason ?? null,
+      bundle: result.bundle ?? null,
+      version: result.version ?? null,
+      pendingBuilds: Array.isArray(result.pendingBuilds) ? result.pendingBuilds : null,
+      warnings: Array.isArray(result.warnings) ? result.warnings : null,
+    };
+    if (result.error) {
+      out.error = {
+        code: result.error.code ?? 'operation-error',
+        diagnostic: result.error.diagnostic ?? null,
+        incompatible: Array.isArray(result.error.incompatible) ? result.error.incompatible : null,
+      };
+    }
+    if (result.packageResult) {
+      const pr = result.packageResult;
+      const output = typeof pr.output === 'string' ? pr.output : '';
+      out.packageResult = {
+        exitCode: pr.exitCode ?? null,
+        kind: pr.kind ?? null,
+        timedOut: pr.timedOut === true,
+        truncated: pr.truncated === true,
+        logPath: pr.logPath ?? null,
+        // 4 KB 足够看清 pnpm 最后说了什么；再多也没人会在手机上读。
+        output: output.length > 4096 ? output.slice(-4096) : output,
+        outputBytes: output.length,
+      };
+    }
+    return out;
+  }
+
+  /** 一条安装任务的对外快照。 */
+  function installSnapshot(requestId, entry) {
+    if (!entry) return { requestId, state: 'unknown' };
+    if (entry.settled) {
+      return {
+        requestId,
+        state: 'done',
+        elapsedMs: entry.elapsedMs,
+        result: entry.result,
+        error: entry.error,
+      };
+    }
+    return {
+      requestId,
+      state: 'running',
+      elapsedMs: Date.now() - entry.startedAt,
+      // 阶段只用于文案（"正在检查…" / "插件安装中…"），不参与判断。
+      stage: entry.stage ?? 'installing',
+    };
+  }
+
+  /** 开一条安装。立刻返回 requestId，真正的结果留在 [installs] 里。 */
+  function startInstall(client, msg, id) {
+    const spec = typeof msg.spec === 'string' ? msg.spec.trim() : '';
+    if (!spec) {
+      send(client, { t: 'error', id, code: 'invalid-spec', message: 'install needs a package spec' });
+      return;
+    }
+    const requestId = typeof msg.requestId === 'string' && msg.requestId.length > 0
+      ? msg.requestId
+      : crypto.randomUUID();
+    const options = { requestId, enabled: msg.enabled !== false };
+    if (typeof msg.registry === 'string' && msg.registry.length > 0) options.registry = msg.registry;
+
+    // 同一个 id 已经在跑：直接把已有的快照发回去，不重复跑一次 pnpm。
+    const existing = installs.get(requestId);
+    if (existing) {
+      send(client, { t: 'plugins', op: 'install', v: installSnapshot(requestId, existing), id });
+      return;
+    }
+
+    const entry = { startedAt: Date.now(), settled: false, result: null, error: null, stage: 'installing' };
+    installs.set(requestId, entry);
+    // 装完的条目留 10 分钟给界面取结果，之后清掉；不清理的话每次安装都会在
+    // 进程里留一份完整的 ChangeResult（含 4 KB 输出），长期跑会一直涨。
+    entry.expiry = setTimeout(() => {
+      if (installs.get(requestId) === entry) installs.delete(requestId);
+    }, 10 * 60_000);
+    entry.expiry.unref?.();
+
+    entry.promise = whenGateway((l) => pmCall(l, 'installBundle', { spec, options }))
+      .then((value) => {
+        entry.settled = true;
+        entry.result = trimChangeResult(value);
+        entry.elapsedMs = Date.now() - entry.startedAt;
+        invalidateSlotsCache(); // 安装完成 = 已装包列表变了，UI 导出必须重算
+        onLog('plugin install finished', {
+          requestId, target: entry.result?.target, application: entry.result?.application,
+        });
+        return entry.result;
+      })
+      .catch((e) => {
+        entry.settled = true;
+        entry.error = { code: e?.code || 'plugin-manager', message: e?.message || String(e) };
+        entry.elapsedMs = Date.now() - entry.startedAt;
+        onLog('plugin install failed', { requestId, code: entry.error.code, message: entry.error.message });
+        return null;
+      });
+
+    send(client, { t: 'plugins', op: 'install', v: installSnapshot(requestId, entry), id });
+  }
+
+  function handlePlugins(client, msg, id) {
+    const op = typeof msg.op === 'string' ? msg.op : 'list';
+    const fail = (e) => send(client, {
+      t: 'error', id, code: e?.code || 'plugin-manager', message: e?.message || String(e),
+    });
+
+    switch (op) {
+      case 'list': {
+        // 三个都要：bundle 是「装了什么」，plugins 是「谁在跑」，registries 是
+        // 「从哪装」。少一个界面就得自己再发一次请求，而列表刷新是高频动作。
+        whenGateway((l) => Promise.all([
+          pmCall(l, 'listBundles', {}),
+          pmCall(l, 'listPlugins', {}),
+          // 安装源读不出来不该让整张列表变空白：装插件是次要动作。
+          pmCall(l, 'registries', {}).catch(() => null),
+        ])).then(([bundles, plugins, registries]) => {
+          const live = (plugins || []).map((p) => ({
+            entryId: p.entryId,
+            moduleName: p.moduleName,
+            title: pickText(p.meta?.title) || p.moduleName || p.entryId,
+            enabled: p.enabled === true,
+            fiberPhase: p.fiberPhase ?? null,
+            readOnlyReason: p.readOnlyReason ?? null,
+          }));
+          send(client, {
+            t: 'plugins',
+            op: 'list',
+            v: {
+              bundles: joinCatalog(bundles, plugins),
+              plugins: live,
+              registries: registries ?? null,
+              at: Date.now(),
+            },
+            id,
+          });
+        }).catch(fail);
+        return;
+      }
+
+      case 'detail': {
+        const name = typeof msg.name === 'string' ? msg.name : '';
+        if (!name) {
+          send(client, { t: 'error', id, code: 'invalid-spec', message: 'detail needs a bundle name' });
+          return;
+        }
+        whenGateway((l) => Promise.all([
+          pmCall(l, 'listBundles', {}),
+          pmCall(l, 'listPlugins', {}),
+        ])).then(([bundles, plugins]) => {
+          const one = (bundles || []).find((b) => b.name === name);
+          if (!one) {
+            send(client, { t: 'error', id, code: 'unknown-plugin', message: `no such bundle: ${name}` });
+            return;
+          }
+          const [detail] = joinCatalog([one], plugins, { withParts: true });
+          send(client, { t: 'plugins', op: 'detail', v: detail, id });
+        }).catch(fail);
+        return;
+      }
+
+      case 'install': startInstall(client, msg, id); return;
+
+      case 'install-status': {
+        const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+        send(client, {
+          t: 'plugins', op: 'install-status', v: installSnapshot(requestId, installs.get(requestId)), id,
+        });
+        return;
+      }
+
+      case 'cancel': {
+        const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+        const entry = installs.get(requestId);
+        if (!entry) {
+          // `cancelInstall` 对未知 id 也只回 `not-running`，但这一条不必再走一遍
+          // 后端：桥自己就知道它没在跑。
+          send(client, { t: 'plugins', op: 'cancel', v: { requestId, status: 'not-running' }, id });
+          return;
+        }
+        whenGateway((l) => pmCall(l, 'cancelInstall', { requestId }))
+          .then((v) => send(client, { t: 'plugins', op: 'cancel', v: { requestId, status: v?.status ?? 'cancelled' }, id }))
+          .catch(fail);
+        return;
+      }
+
+      case 'remove': {
+        const name = typeof msg.name === 'string' ? msg.name : '';
+        if (!name) {
+          send(client, { t: 'error', id, code: 'invalid-spec', message: 'remove needs a bundle name' });
+          return;
+        }
+        whenGateway((l) => pmCall(l, 'removeBundle', { name }))
+          .then((v) => {
+            invalidateSlotsCache(); // 装的包变了，UI 导出必须重算
+            send(client, { t: 'plugins', op: 'remove', v: trimChangeResult(v), id });
+          })
+          .catch(fail);
+        return;
+      }
+
+      case 'bundle-enabled': {
+        const name = typeof msg.name === 'string' ? msg.name : '';
+        if (!name) {
+          send(client, { t: 'error', id, code: 'invalid-spec', message: 'bundle-enabled needs a bundle name' });
+          return;
+        }
+        const enabled = msg.enabled === true;
+        whenGateway((l) => pmCall(l, 'setBundleEnabled', { name, enabled }))
+          .then((v) => {
+            invalidateSlotsCache(); // 启停改变导出的输入（停用的包不再导出）
+            send(client, { t: 'plugins', op: 'bundle-enabled', v: trimChangeResult(v), id });
+          })
+          .catch(fail);
+        return;
+      }
+
+      case 'plugin-enabled': {
+        // 载荷字段叫 `pluginId` 而不是 `id`：`id` 在这套帧里已经是「命令关联 id」，
+        // 同名会让 `id` 既是回包地址又是插件名 —— 一条命令只能有一个 id。
+        const pluginId = typeof msg.pluginId === 'string' ? msg.pluginId : '';
+        if (!pluginId) {
+          send(client, { t: 'error', id, code: 'invalid-spec', message: 'plugin-enabled needs a pluginId' });
+          return;
+        }
+        const enabled = msg.enabled === true;
+        whenGateway((l) => pmCall(l, 'setPluginEnabled', { id: pluginId, enabled }))
+          .then((v) => {
+            invalidateSlotsCache();
+            send(client, { t: 'plugins', op: 'plugin-enabled', v: trimChangeResult(v), id });
+          })
+          .catch(fail);
+        return;
+      }
+
+      default:
+        send(client, { t: 'error', id, code: 'unknown-command', message: `unknown plugins op ${op}` });
+    }
   }
 
   function handle(client, msg) {
@@ -603,10 +1121,28 @@ export function createBridgeServer(opts = {}) {
         send(client, { t: 'pong', id: msg.id ?? null });
         return;
 
+      // ── 插件管理 ──────────────────────────────────────────────────────────
+      // 一条命令一族 op（`{t:'plugins', op:'list'|'install'|…}`），而不是给每个
+      // 动作各开一条 `t`：它们共享同一份 requestId 生命周期与错误码约定，拆开
+      // 之后「装到一半的进度」就要跨命令传状态。
+      //
+      // 挂 whenGateway 的理由与 `sessions` 相同：pluginManager 是 dsh 的
+      // profile 服务，后端 attach 之前它压根不存在。
+      case 'plugins':
+        handlePlugins(client, msg, msg.id ?? null);
+        return;
+
+      // ── 插件 UI 导出 ────────────────────────────────────────────────────
+      // 一条独立的命令而不是 `plugins` 的一个 op：它不走 pluginManager 的其它
+      // op 共享的 requestId 生命周期，回包是一个可能几百 KB 的 IR 载荷，而
+      // Flutter 侧对它的处理（替换 SlotBundle）也与插件管理界面无关。
+      case 'slots':
+        handleSlots(client, msg, msg.id ?? null);
+        return;
+
       case 'models': {
         const id = msg.id ?? null;
-        const l = ensureLink();
-        Promise.resolve(l.loadModels({ sessionId: msg.sessionId || client.sessionId }))
+        whenGateway((l) => l.loadModels({ sessionId: msg.sessionId || client.sessionId }))
           .then((r) => {
             send(client, { t: 'models', v: r?.models || [], selected: r?.selected ?? null, id });
           })
@@ -630,8 +1166,7 @@ export function createBridgeServer(opts = {}) {
           send(client, { t: 'error', id, code: 'rpc', message: 'rpc needs string ns and method' });
           return;
         }
-        const l = ensureLink();
-        Promise.resolve(l.transport.call(`${msg.ns}.${msg.method}`, msg.args ?? {}))
+        whenGateway((l) => l.transport.call(`${msg.ns}.${msg.method}`, msg.args ?? {}))
           .then((r) => {
             if (!r?.ok) {
               send(client, {
@@ -654,8 +1189,7 @@ export function createBridgeServer(opts = {}) {
         // 会话列表是唯一一个 session-link 没有包装的调用：直接用 transport，
         // 这样两种载体走的是同一条路（inproc 侧由方言表装成 {_request:{}}）。
         const id = msg.id ?? null;
-        const l = ensureLink();
-        Promise.resolve(l.transport.call('session.list', {}))
+        whenGateway((l) => l.transport.call('session.list', {}))
           .then((r) => {
             if (!r?.ok) {
               send(client, {
@@ -673,13 +1207,11 @@ export function createBridgeServer(opts = {}) {
 
       case 'prompt': {
         const id = msg.id ?? null;
-        const l = ensureLink();
         stats.prompts += 1;
         // `session.prompt` is durable admission: it resolves with
         // {accepted:true} and the actual reply arrives on the event stream.
         // Awaiting it here would hang the command for the length of a turn.
-        Promise.resolve()
-          .then(() => l.send({
+        whenGateway((l) => l.send({
             sessionId: msg.sessionId || client.sessionId,
             text: msg.text,
             mode: msg.mode || 'queue',
