@@ -339,4 +339,50 @@ void main() {
     // 卸载失败时不该把详情页关掉 —— 关掉会让用户以为卸成功了。
     expect(find.byType(BundleDetailPage), findsOneWidget);
   });
+
+  // 设置页的「内置插件」是只读 tab：能看，不能装 / 启停 / 卸载。
+  // 上游就是这么分工的（装插件在顶层「插件」页），两处都能装会让状态打架。
+  testWidgets('只读模式：没有刷新/添加/开关，详情页也没有卸载', (tester) async {
+    final bridge = ScriptedBridge({
+      'plugins/list': catalogReply([_whale, _baked]),
+      'plugins/detail': {
+        't': 'plugins',
+        'op': 'detail',
+        'v': {
+          ..._whale,
+          'partList': [
+            {
+              'entryId': 'include:a1',
+              'moduleName': 'whale-pet',
+              'title': '鲸鱼',
+              'id': 'a1',
+              'enabled': true,
+              'state': 'running',
+            },
+          ],
+        },
+      },
+    });
+    await tester.binding.setSurfaceSize(const Size(800, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(host(PluginConsole(bridge: bridge, readOnly: true)));
+    await tester.pumpAndSettle();
+
+    // 清单照样是活的：包名、状态、诊断都在。
+    expect(find.text('鲸鱼宠物'), findsOneWidget);
+    expect(find.textContaining('1 个组件'), findsOneWidget);
+    // 但三个写入口全没有。
+    expect(find.byKey(const Key('plugins-refresh')), findsNothing);
+    expect(find.byKey(const Key('plugins-add')), findsNothing);
+    expect(find.byKey(const Key('switch-dsh-plugin-whale-pet')), findsNothing);
+    expect(find.byType(Switch), findsNothing);
+    expect(find.textContaining('安装、启停与配置在「插件」页'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('plugin-bundle-dsh-plugin-whale-pet')));
+    await tester.pumpAndSettle();
+    expect(find.byType(BundleDetailPage), findsOneWidget);
+    expect(find.byKey(const Key('part-include:a1')), findsOneWidget);
+    expect(find.byKey(const Key('bundle-uninstall')), findsNothing);
+    expect(find.byKey(const Key('part-switch-include:a1')), findsNothing);
+  });
 }

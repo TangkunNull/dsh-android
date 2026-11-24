@@ -42,6 +42,9 @@ class SplashActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 最近任务卡片的标题。必须在 super.onCreate 之后：窗口在这之前还不存在，
+        // 而首帧之后 Flutter 的 `Title` widget 会用自己的（同一个）标签覆盖一次。
+        applyTaskLabel()
 
         val pageSize = runCatching { Os.sysconf(OsConstants._SC_PAGESIZE) }.getOrDefault(4096L)
         // 鸿蒙排查入口：华为设备把 HarmonyOS 版本号放在私有 prop 里，Build.VERSION

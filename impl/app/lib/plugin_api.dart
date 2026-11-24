@@ -253,6 +253,114 @@ class PluginCatalog {
       bundles.where((b) => b.optional && !b.enabled).toList();
 }
 
+/// 一个设置命名空间的只读视图（`settings/describe` 的一行）。
+///
+/// 字段名照 `dsh-api-settings-controller` 的 `namespaceView`：`ns` / `schema` /
+/// `value` / `base` / `user` / `applies` / `secrets` / `revision`。这里只收界面
+/// 用得到的那些 —— 其余字段（`applies`、`autoGenerate`）是给设置页做表单用的，
+/// 手机端的插件页只做只读展示。
+class SettingsNamespace {
+  final String ns;
+
+  /// 序列化后的 schema。形状随命名空间变，不在这里建模。
+  final Map<String, dynamic>? schema;
+
+  /// 生效值（`redactSecrets: true`，密钥字段不会出现在这里）。
+  final Map<String, dynamic>? value;
+  final Map<String, dynamic>? base;
+  final Map<String, dynamic>? user;
+
+  /// 哪些路径是凭据。`set` 说「有没有设过」，值本身不会下发。
+  final List<SettingsSecret> secrets;
+  final int revision;
+
+  const SettingsNamespace({
+    required this.ns,
+    this.schema,
+    this.value,
+    this.base,
+    this.user,
+    this.secrets = const [],
+    this.revision = 0,
+  });
+
+  factory SettingsNamespace.fromJson(Map<String, dynamic> j) => SettingsNamespace(
+        ns: (j['ns'] ?? '').toString(),
+        schema: _mapOrNull(j['schema']),
+        value: _mapOrNull(j['value']),
+        base: _mapOrNull(j['base']),
+        user: _mapOrNull(j['user']),
+        secrets: ((j['secrets'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) => SettingsSecret.fromJson(Map<String, dynamic>.from(e)))
+            .toList(),
+        revision: _int(j['revision']),
+      );
+
+  /// `a.b.c` 形式的路径，用于展示「哪一项是凭据」。
+  List<String> get secretPaths => secrets.map((s) => s.path).where((p) => p.isNotEmpty).toList();
+}
+
+/// 一条凭据声明。`path` 是字段路径，`set` 是「用户设过没有」。
+class SettingsSecret {
+  final String path;
+  final bool set;
+
+  const SettingsSecret({this.path = '', this.set = false});
+
+  factory SettingsSecret.fromJson(Map<String, dynamic> j) {
+    final raw = j['path'];
+    final path = raw is List ? raw.map((e) => e.toString()).join('.') : (raw ?? '').toString();
+    return SettingsSecret(path: path, set: j['set'] == true);
+  }
+}
+
+/// `settings/describe` 的一整份结果。
+class SettingsDescription {
+  final List<SettingsNamespace> namespaces;
+
+  /// 这个部署的设置为只读（`writable == false`）。
+  final bool writable;
+  final DateTime fetchedAt;
+
+  const SettingsDescription({
+    this.namespaces = const [],
+    this.writable = false,
+    required this.fetchedAt,
+  });
+
+  factory SettingsDescription.fromJson(Map<String, dynamic> j) {
+    final raw = (j['namespaces'] as List?) ?? const [];
+    return SettingsDescription(
+      namespaces: raw
+          .whereType<Map>()
+          .map((e) => SettingsNamespace.fromJson(Map<String, dynamic>.from(e)))
+          .toList(),
+      writable: j['writable'] == true,
+      fetchedAt: DateTime.now(),
+    );
+  }
+
+  /// 按命名空间取一条。名字对不上就是 null —— 调用方必须能容忍「这个部署没装
+  /// 这个插件」，而不是拿空表当成「配置为空」。
+  SettingsNamespace? byNs(String ns) {
+    for (final n in namespaces) {
+      if (n.ns == ns) return n;
+    }
+    return null;
+  }
+
+  /// 按一组候选命名空间取第一条存在的（`bash-sandbox` / `pwsh-sandbox` 这类
+  /// 平台互斥的两个）。
+  SettingsNamespace? firstOf(List<String> candidates) {
+    for (final ns in candidates) {
+      final found = byNs(ns);
+      if (found != null) return found;
+    }
+    return null;
+  }
+}
+
 /// 一次变更（安装 / 卸载 / 启停）的结果。
 ///
 /// 形状来自 `ChangeResult`。`application` 是**结果的性质**而不是成功与否：
@@ -397,6 +505,37 @@ class PluginApi {
     final v = frame['v'];
     if (v is! Map) throw const HarnessCommandError('plugins', 'list 回复缺少 v');
     return PluginCatalog.fromJson(Map<String, dynamic>.from(v));
+  }
+
+  /// 设置命名空间的只读快照（`settings/describe`）。
+  ///
+  /// 走的是桥的通用直通（`{t:'rpc', ns, method, args}`，见
+  /// `bridge-server.mjs` 的 `case 'rpc'`），不是 `plugins` 命令族 —— 这条 RPC 属于
+  /// dsh 自己的设置服务，插件管理器只是其中一个调用方。
+  ///
+  /// 形状（`dsh-api-settings-controller/lib/index.js` 的 `describe()`）：
+  ///
+  /// ```json
+  /// { "writable": true, "hasDocument": true,
+  ///   "namespaces": [{ "ns": "subagent", "schema": {...}, "value": {...},
+  ///                    "base": {...}, "user": {...}, "applies": [...],
+  ///                    "secrets": [{ "path": ["apiKey"], "set": true }],
+  ///                    "revision": 3 }] }
+  /// ```
+  ///
+  /// `describe()` 没有形参，所以 `args` 必须是空对象：typert 按方法签名校验，
+  /// 多塞一个 `request`/`ns` 会被判成 `gateway/arguments-invalid`。
+  ///
+  /// 失败要能单独收：插件页的「内置插件配置」四项是**静态**的，配置读不到只是
+  /// 详情页里说明原因，不能让整个页面变空。
+  Future<SettingsDescription> describeSettings() async {
+    final frame = await _call(
+      {'t': 'rpc', 'ns': 'settings', 'method': 'describe', 'args': <String, dynamic>{}},
+      listTimeout,
+    );
+    final v = frame['v'];
+    if (v is! Map) throw const HarnessCommandError('settings', 'describe 回复缺少 v');
+    return SettingsDescription.fromJson(Map<String, dynamic>.from(v));
   }
 
   Future<PluginBundle> detail(String name) async {

@@ -72,7 +72,7 @@ void main() {
     expect(find.byType(ChatScreen), findsNothing);
     expect(find.text('选一个会话，或新建一个'), findsOneWidget,
         reason: '没有可选会话时中栏不能是空白');
-    expect(find.text('还没有会话'), findsOneWidget);
+    expect(find.text('暂无会话'), findsOneWidget);
   });
 
   testWidgets('宽屏：收起成 rail 之后会话不丢', (tester) async {

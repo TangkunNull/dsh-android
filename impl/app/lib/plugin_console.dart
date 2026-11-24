@@ -27,6 +27,9 @@ import 'unix_bridge.dart' show HarnessCommandError;
 const _tIntro = '安装、启用和配置插件';
 const _tAdd = '添加插件';
 const _tRefresh = '刷新';
+
+/// 设置页「内置插件」那一格是**只读清单**：装、启停、配置都在顶层「插件」页。
+const _tIntroReadOnly = '内置插件与已安装插件的当前状态；安装、启停与配置在「插件」页';
 const _tLoading = '正在读取插件…';
 const _tLoadError = '可能由于网络问题，无法读取全部插件';
 const _tRetry = '重试';
@@ -187,7 +190,19 @@ class PluginConsole extends StatefulWidget {
   /// 装完/卸完之后通知外层（外层可能要重新拉插槽 IR）。
   final VoidCallback? onChanged;
 
-  const PluginConsole({super.key, required this.bridge, this.onChanged});
+  /// 只读模式：设置页的「内置插件」用。
+  ///
+  /// 上游设置里的「内置插件」是一个只读 tab —— 能看清单和状态，但装 / 启停 /
+  /// 卸载都在顶层「插件」页（`PluginCenterScreen`）。这里把那些入口藏掉而不是
+  /// 留着点了没反应：一个在设置页里「也能装插件」的第二入口只会让两处状态打架。
+  final bool readOnly;
+
+  const PluginConsole({
+    super.key,
+    required this.bridge,
+    this.onChanged,
+    this.readOnly = false,
+  });
 
   @override
   State<PluginConsole> createState() => _PluginConsoleState();
@@ -263,13 +278,9 @@ class _PluginConsoleState extends State<PluginConsole> {
   Future<void> _openInstall() async {
     final api = _api;
     if (api == null) return;
-    final installed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => _InstallDialog(api: api, registries: _catalog?.registries),
-    );
+    final installed = await showInstallDialog(context, api: api, registries: _catalog?.registries);
     if (!mounted) return;
-    if (installed == true) {
+    if (installed) {
       widget.onChanged?.call();
       await _load();
     }
@@ -283,6 +294,7 @@ class _PluginConsoleState extends State<PluginConsole> {
         api: api,
         name: bundle.name,
         initial: bundle,
+        readOnly: widget.readOnly,
         // 组件开关改了也要重拉：计数（N 运行中）与列表里的状态跟着变。
         onChanged: widget.onChanged,
       ),
@@ -323,7 +335,7 @@ class _PluginConsoleState extends State<PluginConsole> {
         _SectionHead(
           icon: Icons.extension,
           title: '插件',
-          action: widget.bridge == null || _api == null
+          action: widget.readOnly || widget.bridge == null || _api == null
               ? null
               : Row(mainAxisSize: MainAxisSize.min, children: [
                   _TextAction(
@@ -343,7 +355,10 @@ class _PluginConsoleState extends State<PluginConsole> {
         ),
         Padding(
           padding: const EdgeInsets.only(left: 2, bottom: 8),
-          child: Text(_tIntro, style: TextStyle(fontSize: DshTokens.fontCaption, color: t.labelSecondary)),
+          child: Text(
+            widget.readOnly ? _tIntroReadOnly : _tIntro,
+            style: TextStyle(fontSize: DshTokens.fontCaption, color: t.labelSecondary),
+          ),
         ),
         ..._body(t),
       ],
@@ -383,12 +398,14 @@ class _PluginConsoleState extends State<PluginConsole> {
           key: const Key('plugins-empty'),
           text: _tEmpty,
           tone: t.labelTertiary,
-          action: _TextAction(
-            key: const Key('plugins-add-empty'),
-            label: _tAdd,
-            icon: Icons.add,
-            onTap: _openInstall,
-          ),
+          action: widget.readOnly
+              ? null
+              : _TextAction(
+                  key: const Key('plugins-add-empty'),
+                  label: _tAdd,
+                  icon: Icons.add,
+                  onTap: _openInstall,
+                ),
         )
       else ...[
         if (installed.isNotEmpty) ...[
@@ -400,7 +417,7 @@ class _PluginConsoleState extends State<PluginConsole> {
                 key: Key('plugin-bundle-${installed[i].name}'),
                 bundle: installed[i],
                 onTap: () => _openDetail(installed[i]),
-                onToggle: installed[i].mutable ? (v) => _toggle(installed[i], v) : null,
+                onToggle: !widget.readOnly && installed[i].mutable ? (v) => _toggle(installed[i], v) : null,
               ),
             ],
           ]),
@@ -414,7 +431,7 @@ class _PluginConsoleState extends State<PluginConsole> {
                 key: Key('plugin-bundle-${optional[i].name}'),
                 bundle: optional[i],
                 onTap: () => _openDetail(optional[i]),
-                onToggle: optional[i].mutable ? (v) => _toggle(optional[i], v) : null,
+                onToggle: !widget.readOnly && optional[i].mutable ? (v) => _toggle(optional[i], v) : null,
               ),
             ],
           ]),
@@ -475,7 +492,17 @@ class BundleDetailPage extends StatefulWidget {
   /// `onPopInvokedWithResult`），靠返回值会让「改了组件再按返回」丢掉刷新。
   final VoidCallback? onChanged;
 
-  const BundleDetailPage({super.key, required this.api, required this.name, this.initial, this.onChanged});
+  /// 只读：从设置页的只读清单点进来时为 true —— 详情能看，不能卸载 / 开关。
+  final bool readOnly;
+
+  const BundleDetailPage({
+    super.key,
+    required this.api,
+    required this.name,
+    this.initial,
+    this.onChanged,
+    this.readOnly = false,
+  });
 
   @override
   State<BundleDetailPage> createState() => _BundleDetailPageState();
@@ -610,7 +637,7 @@ class _BundleDetailPageState extends State<BundleDetailPage> {
             overflow: TextOverflow.ellipsis,
           ),
           actions: [
-            if (b != null && b.removable)
+            if (!widget.readOnly && b != null && b.removable)
               TextButton(
                 key: const Key('bundle-uninstall'),
                 onPressed: _confirmRemove,
@@ -715,7 +742,7 @@ class _BundleDetailPageState extends State<BundleDetailPage> {
             _PartRow(
               key: Key('part-${visible[i].entryId}'),
               part: visible[i],
-              onToggle: visible[i].canToggle && visible[i].readOnlyReason == null
+              onToggle: !widget.readOnly && visible[i].canToggle && visible[i].readOnlyReason == null
                   ? (v) => _togglePart(visible[i], v)
                   : null,
             ),
@@ -738,17 +765,39 @@ class _BundleDetailPageState extends State<BundleDetailPage> {
 /// 三步在同一个对话框里：安装是长任务，中途换页会让用户以为失败了、想再点一次。
 /// 取消按钮走 `plugins/cancel`，后端回 `too-late` 时如实说明（那时候已经进了
 /// 收尾阶段，取消不掉，只能等结果）。
-class _InstallDialog extends StatefulWidget {
+///
+/// 公开（而非本文件私有）：顶层的插件页（`plugin_center.dart`）也用这一个对话框，
+/// 安装逻辑只有一份 —— 两处各写一遍会让「取消」「too-late」「重启后生效」这些
+/// 边角在不同页面上给出不同结果。
+class InstallDialog extends StatefulWidget {
   final PluginApi api;
   final PluginRegistries? registries;
 
-  const _InstallDialog({required this.api, this.registries});
+  const InstallDialog({super.key, required this.api, this.registries});
 
   @override
-  State<_InstallDialog> createState() => _InstallDialogState();
+  State<InstallDialog> createState() => _InstallDialogState();
 }
 
-class _InstallDialogState extends State<_InstallDialog> {
+/// 打开一次安装对话。返回 true 表示「装成功了」（调用方据此刷新列表）。
+///
+/// 单独抽一个函数而不是让调用方自己 `showDialog`：这个对话框的关键契约是
+/// `barrierDismissible: false`（安装中误触背景不该让进度消失），而这份契约写在
+/// 每个调用点都会被漏掉一次。
+Future<bool> showInstallDialog(
+  BuildContext context, {
+  required PluginApi api,
+  PluginRegistries? registries,
+}) async {
+  final installed = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => InstallDialog(api: api, registries: registries),
+  );
+  return installed == true;
+}
+
+class _InstallDialogState extends State<InstallDialog> {
   final _spec = TextEditingController();
   Timer? _poll;
 

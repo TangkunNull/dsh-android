@@ -7,22 +7,23 @@
 
 | 制品 | 体积 | versionCode | libnode | 下载 |
 |---|---|---|---|---|
-| `dsh-android-0.1.23-release.apk` | 73 MB | 19 | full（small-icu） | [Release v0.1.23](https://github.com/TangkunNull/dsh-android/releases/tag/v0.1.23) |
+| `dsh-android-0.1.24-release.apk` | 73 MB | 20 | full（small-icu） | 本地产出 |
 | `dsh-probe-0.1.17-release.apk` | 54 MB | 13 | full（small-icu） | 本地产出（未发 Release） |
 
 主应用（`ai.dsh.app`）：Flutter 原生 UI，桌面名称 **DSH Android**，连同一套 harness，是最终交付形态。
 探针版（`ai.dsh.probe`）：点「生成报告」，导出环境与启动日志，用于没有 adb 时定位问题。
 
 产物命名：主应用 `dsh-android-<版本>-release.apk`，探针 `dsh-probe-<版本>-release.apk`。
-两者 versionName / versionCode 始终对齐（0.1.23 / 19），避免"哪个包对应哪次修复"说不清。
+两者 versionName / versionCode 始终对齐（0.1.24 / 20），避免"哪个包对应哪次修复"说不清。
 0.1.18 起只重打主应用：改动在 Flutter / Kotlin 壳层与 host 桥，探针包无需重出。
-0.1.23 的运行时 **buildId 变了**（`4ecb93f5e4566766` → `edbb393520aedf1f`，17698 文件），覆盖安装后首次启动会重解包。
+0.1.24 未改运行时，buildId 保持 `edbb393520aedf1f`（17698 文件），覆盖安装不重解包。
 minSdk 28（Android 9+），arm64-v8a。
 
 ## 2. 台账
 
 | 文件 | 体积 | SHA-256 | versionCode | 运行时 buildId |
 |---|---|---|---|---|
+| `dsh-android-0.1.24-release.apk` | 73 MB | `be4caae99405ccf2c14f22255f28d24295b5f3b0212fd5c5e1f5f5f35eda2474` | 20 | `edbb393520aedf1f`（17698 文件） |
 | `dsh-android-0.1.23-release.apk` | 73 MB | `961f84fb6133029a3fbd877cdd1da458f653b9b9483f9bdfa95e78cf7bac54bb` | 19 | `edbb393520aedf1f`（17698 文件） |
 | `dsh-android-0.1.22-release.apk` | 73 MB | `ea05e2e08e472ef56e315c99fe7a1e282737e4f4bc68f42f8400a54aeeb26cbf` | 18 | `4ecb93f5e4566766`（**已损坏，勿装**：runtime 缺 react-reconciler，启动必失败） |
 | `dsh-android-0.1.21-release.apk` | 73 MB | `e1c4596ab15790bcd81e323bc06e96f9a5fce2b19df1c51cf6d26896c772e482` | 17 | `4ecb93f5e4566766`（**已损坏，勿装**：解包器父目录缺失，启动必失败） |
@@ -31,6 +32,15 @@ minSdk 28（Android 9+），arm64-v8a。
 | `dsh-android-0.1.18-release.apk` | 63 MB | `a9a710a5b938662a1771bff9528937c429604e5284e3629a0ca14af059381d3c` | 14 | `8100fb8ec3fc5af7`（16433 文件） |
 | `dsh-android-0.1.17-release.apk` | 63 MB | `c4069ec7ff8e77460d072d9aee95cdc3077601542308c235c4858457bf8ae9f0` | 13 | `8100fb8ec3fc5af7`（16433 文件） |
 | `dsh-probe-0.1.17-release.apk` | 54 MB | `1a966f74bca0fc70426f171ee50a612ab5c7a7ec763f930079a775c7f12c3cec` | 13 | `8100fb8ec3fc5af7`（16433 文件） |
+
+### 0.1.24 改了什么
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 最近任务应用名 | 显示 `dsh` | `DSH Android`。根因是 Flutter 的 `Title` 每帧调 `setApplicationSwitcherDescription` 覆盖任务描述；`MaterialApp.title`、两个 Activity 的 `android:label`、`onCreate` 的 `setTaskDescription` 三处一起改才有用 |
+| 侧栏结构 | 品牌行 + 新会话 + 会话列表 | 增加「插件 / 自动化任务 / 更多」面板行（36px、左右 9、圆角 12、选中底色内缩 3px）；工作区头带搜索/筛选/新建；空态「暂无会话」；更多菜单两项 |
+| 插件页 | 藏在设置里的兼容性矩阵 | 顶层「插件」页：标题/副标题/刷新/添加插件，内置插件配置（子智能体/网页搜索/Agent 循环/终端，读 `settings.describe`）、实验性插件（4 个 bundle 开关走 `setBundleEnabled`）、已安装插件（保留兼容性诊断） |
+| 设置页 | 顶部横条 + 自造条目 | 左栏五个分区对齐上游：账号与余额(-10)/通用设置(0)/模型(10)/内置插件(15)/Agent 预设(20)；通用设置 11 条按上游 order 排列，禁用项写明「桌面端专属」；外观/字号/四个偏好真能改并落 `settings.json` |
 
 ### 0.1.23 改了什么
 

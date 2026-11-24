@@ -39,6 +39,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 最近任务卡片的标题（FlutterActivity 自己不会设）。`super.onCreate` 会加载
+        // 引擎，所以只能排在它之后；首帧之后 Flutter 的 `Title` widget 用同一个值
+        // 再设一次，见 TaskLabel.kt 的注释。
+        applyTaskLabel()
         requestNotificationPermission()
     }
 

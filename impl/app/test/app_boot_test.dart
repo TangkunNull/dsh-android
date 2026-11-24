@@ -283,7 +283,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
 
       expect(find.byKey(const Key('new-session')), findsOneWidget);
-      expect(find.text('还没有会话'), findsOneWidget);
+      expect(find.text('暂无会话'), findsOneWidget);
       expect(find.byType(ChatScreen), findsNothing);
 
       await tester.pumpWidget(const SizedBox.shrink());

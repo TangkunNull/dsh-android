@@ -300,7 +300,13 @@ class _DshAppState extends State<DshApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'dsh',
+      // 最近任务卡片的标题就是这一个值：`WidgetsApp` 用 `Title` widget 把它写进
+      // `SystemChrome.setApplicationSwitcherDescription`，Android 侧落到
+      // `Activity.setTaskDescription` —— 它会**覆盖** Activity.onCreate 里设的那个。
+      // 写成 `dsh` 时华为的最近任务显示 `dsh`（本轮修的就是这个）。三处必须一致：
+      // 这里是第三处，另两处是 AndroidManifest 的 activity label 与
+      // `applyTaskLabel()`，见 android/.../TaskLabel.kt。
+      title: 'DSH Android',
       debugShowCheckedModeBanner: false,
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
@@ -660,6 +666,11 @@ class _HomeShellState extends State<HomeShell> {
       onOpen: _openChat,
       onCreate: _newChat,
       onOpenSettings: _openSettings,
+      // 面板行「插件」压栈的那一页要这两个：bridge 决定能不能读列表/启停，
+      // registry 是它每张卡片展开区里的构建期兼容性快照。
+      bridge: _bridge,
+      registry: widget.boot.plugins,
+      slotInfo: widget.slotInfo,
       header: _shellSlots == null
           ? null
           : Padding(
@@ -711,10 +722,13 @@ class _HomeShellState extends State<HomeShell> {
                 loading: _loading,
                 error: _error,
                 // 手动重试就是「我现在要看」，不再走退避：立刻给结果，失败就报失败。
-      onRefresh: () => _load(autoRetry: false),
+                onRefresh: () => _load(autoRetry: false),
                 onOpen: _openChat,
                 onCreate: _newChat,
                 onOpenSettings: _openSettings,
+                bridge: _bridge,
+                registry: widget.boot.plugins,
+                slotInfo: widget.slotInfo,
                 embedded: true,
                 activeId: _selected?.id,
                 onCollapse: () => setState(() => _rail = true),

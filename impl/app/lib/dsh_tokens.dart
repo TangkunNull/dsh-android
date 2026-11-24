@@ -285,6 +285,12 @@ class DshTokens {
   Color get bgLayer2 => raw('--dsw-alias-bg-layer-2');
   Color get bgLayer3 => raw('--dsw-alias-bg-layer-3');
 
+  /// 模态背后的那层底（`--dsw-alias-bg-overlay`）：浅色 `#e9ecf2`，深色 `#61666b`。
+  ///
+  /// 设置面板在原版里是浮在应用之上的 800 模态，四周能看见这层底；本项目把设置
+  /// 做成整页 push，页面底色用它，面板才是白的（不然浅色下白压白，看不出边界）。
+  Color get bgOverlay => raw('--dsw-alias-bg-overlay', fallback: bgBase);
+
   /// 侧栏底色（`--dsw-specific-sidebar-fill`）：浅色 `#f9fafb`，深色 `#1b1b1c`。
   Color get sidebarFill => dark ? const Color(0xFF1B1B1C) : const Color(0xFFF9FAFB);
 

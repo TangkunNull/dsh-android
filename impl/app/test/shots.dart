@@ -16,9 +16,86 @@ import 'package:dsh_native/chat_screen.dart';
 import 'package:dsh_native/client.dart';
 import 'package:dsh_native/dsh_tokens.dart';
 import 'package:dsh_native/main.dart';
+import 'package:dsh_native/harness_client.dart';
+import 'package:dsh_native/plugin_center.dart';
 import 'package:dsh_native/plugin_manager.dart';
 import 'package:dsh_native/session.dart';
 import 'package:dsh_native/session_list.dart';
+import 'package:dsh_native/settings_prefs.dart';
+import 'package:dsh_native/settings_screen.dart';
+
+/// 只回一份罐头的桥：截图不跑后端，插件页要的 `plugins/list` 与
+/// `settings/describe` 各给一份固定的回复。
+class _ShotBridge implements HarnessBridge {
+  @override
+  Stream<Map<String, dynamic>> get events => const Stream<Map<String, dynamic>>.empty();
+
+  @override
+  void send(Map<String, dynamic> command) {}
+
+  @override
+  void dispose() {}
+
+  @override
+  Future<Map<String, dynamic>> request(
+    Map<String, dynamic> command, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    if (command['t'] == 'plugins') {
+      return {
+        't': 'plugins',
+        'v': {
+          'at': 0,
+          'bundles': [
+            {
+              'name': 'dsh-plugin-whale-pet',
+              'title': '鲸鱼宠物',
+              'description': '一只会游泳的鲸鱼',
+              'version': '0.2.9',
+              'availability': 'profile',
+              'enabled': true,
+              'installed': true,
+              'removable': true,
+              'parts': {'total': 1, 'running': 1, 'failed': 0, 'off': 0},
+            },
+            {
+              'name': '@deepseek-ai/dsh-base',
+              'title': '@deepseek-ai/dsh-base',
+              'availability': 'installation',
+              'enabled': true,
+              'readOnlyReason': 'management-required',
+              'parts': {'total': 97, 'running': 81, 'failed': 0, 'off': 16},
+            },
+            {
+              'name': '@deepseek-ai/dsh-experimental-voice-input-bundle',
+              'title': '@deepseek-ai/dsh-experimental-voice-input-bundle',
+              'availability': 'installation',
+              'enabled': false,
+              'optional': true,
+              'parts': {'total': 2, 'running': 0, 'failed': 0, 'off': 2},
+            },
+          ],
+          'plugins': <Map<String, dynamic>>[],
+          'registries': {'resolved': 'https://registry.npmmirror.com/'},
+        },
+      };
+    }
+    return {
+      't': 'rpc',
+      'v': {
+        'writable': true,
+        'namespaces': [
+          {
+            'ns': 'subagent',
+            'value': {'maxDepth': 2},
+            'secrets': <Map<String, dynamic>>[],
+            'revision': 3,
+          },
+        ],
+      },
+    };
+  }
+}
 
 SessionSummary _s(String id, String title, {required int minutesAgo, bool running = false}) => SessionSummary(
       id: id,
@@ -200,6 +277,43 @@ void main() {
     await shot(tester, '/tmp/shot_list_dark.png');
   });
 
+  testWidgets('plugin center', (tester) async {
+    tester.binding.window.physicalSizeTestValue = const Size(390, 844);
+    tester.binding.window.devicePixelRatioTestValue = 1;
+    addTearDown(tester.binding.window.clearPhysicalSizeTestValue);
+
+    await tester.pumpWidget(themed(PluginCenterScreen(
+      bridge: _ShotBridge(),
+      registry: PluginRegistry.fromJsonString('''
+        [{"id":"dsh-plugin-whale-pet","state":"failed","error":"canvas 上下文未注入","slots":2,"caps":["canvas2d"]}]
+      '''),
+    )));
+    await tester.pump(const Duration(milliseconds: 50));
+    await shot(tester, '/tmp/shot_plugins.png');
+  });
+
+  testWidgets('plugin center diagnostics', (tester) async {
+    tester.binding.window.physicalSizeTestValue = const Size(390, 844);
+    tester.binding.window.devicePixelRatioTestValue = 1;
+    addTearDown(tester.binding.window.clearPhysicalSizeTestValue);
+
+    await tester.pumpWidget(themed(PluginCenterScreen(
+      bridge: _ShotBridge(),
+      registry: PluginRegistry.fromJsonString('''
+        [{"id":"dsh-plugin-whale-pet","state":"failed","error":"canvas 上下文未注入","slots":2,"caps":["canvas2d"]}]
+      '''),
+    )));
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('plugin-card-head-dsh-plugin-whale-pet')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('plugin-card-head-dsh-plugin-whale-pet')));
+    await tester.pump(const Duration(milliseconds: 200));
+    await shot(tester, '/tmp/shot_plugins_diag.png');
+  });
+
   testWidgets('boot shell', (tester) async {
     tester.binding.window.physicalSizeTestValue = const Size(1100, 800);
     tester.binding.window.devicePixelRatioTestValue = 1;
@@ -211,5 +325,52 @@ void main() {
     ));
     await tester.pump();
     await shot(tester, '/tmp/shot_boot.png');
+  });
+
+  testWidgets('settings wide', (tester) async {
+    tester.binding.window.physicalSizeTestValue = const Size(1180, 860);
+    tester.binding.window.devicePixelRatioTestValue = 1;
+    addTearDown(tester.binding.window.clearPhysicalSizeTestValue);
+
+    await tester.pumpWidget(themed(SettingsScreen(
+      registry: PluginRegistry.fromJsonString('''
+        [{"id":"dsh-plugin-whale-pet","state":"failed","error":"canvas 上下文未注入","slots":2}]
+      '''),
+      store: SettingsStore(persist: false),
+    )));
+    await tester.pump(const Duration(milliseconds: 50));
+    await shot(tester, '/tmp/shot_settings_wide.png');
+  });
+
+  testWidgets('settings wide dark', (tester) async {
+    tester.binding.window.physicalSizeTestValue = const Size(1180, 860);
+    tester.binding.window.devicePixelRatioTestValue = 1;
+    addTearDown(tester.binding.window.clearPhysicalSizeTestValue);
+
+    await tester.pumpWidget(themed(
+      SettingsScreen(
+        registry: PluginRegistry.empty(),
+        store: SettingsStore(persist: false),
+        darkMode: true,
+      ),
+      b: Brightness.dark,
+    ));
+    await tester.pump(const Duration(milliseconds: 50));
+    await shot(tester, '/tmp/shot_settings_dark.png');
+  });
+
+  testWidgets('settings narrow', (tester) async {
+    tester.binding.window.physicalSizeTestValue = const Size(390, 844);
+    tester.binding.window.devicePixelRatioTestValue = 1;
+    addTearDown(tester.binding.window.clearPhysicalSizeTestValue);
+
+    await tester.pumpWidget(themed(SettingsScreen(
+      registry: PluginRegistry.empty(),
+      store: SettingsStore(persist: false),
+    )));
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tap(find.byKey(const Key('settings-tab-account')));
+    await tester.pump(const Duration(milliseconds: 50));
+    await shot(tester, '/tmp/shot_settings_narrow.png');
   });
 }

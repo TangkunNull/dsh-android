@@ -2,7 +2,7 @@ name: dsh_native
 description: dsh native renderer
 # 许可证：AGPL-3.0。可商用但衍生必须开源；闭源商用须取得授权 —— 见仓库根目录 LICENSE / COMMERCIAL.md。
 publish_to: none
-version: 0.1.23+19
+version: 0.1.24+20
 environment:
   sdk: ">=2.17.0 <3.0.0"
 dependencies:
