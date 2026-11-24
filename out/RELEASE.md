@@ -7,29 +7,38 @@
 
 | 制品 | 体积 | versionCode | libnode | 下载 |
 |---|---|---|---|---|
-| `dsh-android-0.1.22-release.apk` | 73 MB | 18 | full（small-icu） | 本地产出（未发 Release） |
+| `dsh-android-0.1.23-release.apk` | 73 MB | 19 | full（small-icu） | GitHub Release `v0.1.23` |
 | `dsh-probe-0.1.17-release.apk` | 54 MB | 13 | full（small-icu） | 本地产出（未发 Release） |
 
 主应用（`ai.dsh.app`）：Flutter 原生 UI，桌面名称 **DSH Android**，连同一套 harness，是最终交付形态。
 探针版（`ai.dsh.probe`）：点「生成报告」，导出环境与启动日志，用于没有 adb 时定位问题。
 
 产物命名：主应用 `dsh-android-<版本>-release.apk`，探针 `dsh-probe-<版本>-release.apk`。
-两者 versionName / versionCode 始终对齐（0.1.22 / 18），避免"哪个包对应哪次修复"说不清。
+两者 versionName / versionCode 始终对齐（0.1.23 / 19），避免"哪个包对应哪次修复"说不清。
 0.1.18 起只重打主应用：改动在 Flutter / Kotlin 壳层与 host 桥，探针包无需重出。
-0.1.22 的运行时 buildId 与 0.1.21 相同（`4ecb93f5e4566766`），但从 0.1.21 升级上来仍会全量重解包——0.1.21 的解包是失败的，文件树残缺，复用检查会判定不可复用。
+0.1.23 的运行时 **buildId 变了**（`4ecb93f5e4566766` → `edbb393520aedf1f`，17698 文件），覆盖安装后首次启动会重解包。
 minSdk 28（Android 9+），arm64-v8a。
 
 ## 2. 台账
 
 | 文件 | 体积 | SHA-256 | versionCode | 运行时 buildId |
 |---|---|---|---|---|
-| `dsh-android-0.1.22-release.apk` | 73 MB | `ea05e2e08e472ef56e315c99fe7a1e282737e4f4bc68f42f8400a54aeeb26cbf` | 18 | `4ecb93f5e4566766`（17756 文件） |
+| `dsh-android-0.1.23-release.apk` | 73 MB | `961f84fb6133029a3fbd877cdd1da458f653b9b9483f9bdfa95e78cf7bac54bb` | 19 | `edbb393520aedf1f`（17698 文件） |
+| `dsh-android-0.1.22-release.apk` | 73 MB | `ea05e2e08e472ef56e315c99fe7a1e282737e4f4bc68f42f8400a54aeeb26cbf` | 18 | `4ecb93f5e4566766`（**已损坏，勿装**：runtime 缺 react-reconciler，启动必失败） |
 | `dsh-android-0.1.21-release.apk` | 73 MB | `e1c4596ab15790bcd81e323bc06e96f9a5fce2b19df1c51cf6d26896c772e482` | 17 | `4ecb93f5e4566766`（**已损坏，勿装**：解包器父目录缺失，启动必失败） |
 | `dsh-android-0.1.20-release.apk` | 63 MB | `4249dcd575b1e97cfecdd9d3fa11b12761bd04e5aaed6c735e4565a6fecdc443` | 16 | `cb897b8cef4df269`（16433 文件） |
 | `dsh-android-0.1.19-release.apk` | 63 MB | `ec7333f4b56a68acb2e8c3c8ed42919927cd7053aff8405e309604176257b5b3` | 15 | `8100fb8ec3fc5af7`（16433 文件） |
 | `dsh-android-0.1.18-release.apk` | 63 MB | `a9a710a5b938662a1771bff9528937c429604e5284e3629a0ca14af059381d3c` | 14 | `8100fb8ec3fc5af7`（16433 文件） |
 | `dsh-android-0.1.17-release.apk` | 63 MB | `c4069ec7ff8e77460d072d9aee95cdc3077601542308c235c4858457bf8ae9f0` | 13 | `8100fb8ec3fc5af7`（16433 文件） |
 | `dsh-probe-0.1.17-release.apk` | 54 MB | `1a966f74bca0fc70426f171ee50a612ab5c7a7ec763f930079a775c7f12c3cec` | 13 | `8100fb8ec3fc5af7`（16433 文件） |
+
+### 0.1.23 改了什么
+
+| 项 | 现象 | 修复 |
+|---|---|---|
+| 启动失败 `Cannot find package 'react-reconciler'` | `export-slots.mjs` 从 `tools/` 搬进 `src/`（进 runtime）后，`reconciler.mjs` 顶层的 `react-reconciler`、`layout.mjs` 的 `yoga-layout` 没有跟着进闭包。0.1.22 解包成功但 Node 起不来 | `CLIENT_ROOTS` 显式补 `react` / `react-reconciler` / `scheduler` / `yoga-layout`（1.73 MB）；新增三条死重裁剪规则（react profiling、katex TS 源、yoga 源码）把严格口径压回 11.4 MB / 预算 12 MB，没有放宽阈值 |
+| 同类问题缺少拦截 | 缺包只能等真机启动才炸 | `pack-runtime` 新增 `gateRuntimeImports()`：打包后把 zip 解到临时目录，对 `node/` 下 47 个 `.mjs` 逐个真 `import()`，任一失败打包非零退出并打出缺的包名。反向验证：删掉 `react-reconciler` 后 7 个文件连带报红、exit=1 |
+| 「查看日志」点了没反应 | `log` 方法其实存在，但日志为空时弹层正文只有 3×14 像素——只剩标题和一片空白遮罩 | 按钮改 `下载日志`：Kotlin 新增 `saveLog`，API ≥29 走 `MediaStore.Downloads` 落 `下载/DSH Android/dsh-log-<时间>.txt`（零权限），API 28 退回应用外部目录；日志为空时保存九步状态+原始 status+错误拼成的诊断文本，绝不存空文件；成功 SnackBar 显示原生返回的真实路径，失败显示原因，保存期间按钮禁用防连点 |
 
 ### 0.1.22 改了什么
 

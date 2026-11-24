@@ -160,3 +160,21 @@ Android 15 起部分设备用 16 KB 内核页，要求 `.so` 的 `LOAD` 段按 `
 
 升级到 Flutter 3.24+ 后把 `SplashActivity.ENGINE_SUPPORTS_16K_PAGES` 置 `true` 并把这段折叠回
 `MainActivity`；先验证 `readelf -lW libflutter.so` 是 `0x4000`。
+
+## 7. 发布流程：提交即发 Release
+
+每次把 APK 推到仓库，**同一个操作里必须建 GitHub Release**——不要留下「代码推了但用户没处下载」的状态。
+
+```bash
+git tag v0.1.x && git push origin main --tags
+gh release create v0.1.x /workspace/dsh-android-0.1.x-release.apk \
+  --title "0.1.x" --notes-file out/RELEASE-0.1.x.md
+```
+
+硬规则：
+
+- tag 与 `pubspec.yaml` 的版本一致（`v` 前缀）；Release 附主应用 APK，探针包有重出才附
+- notes 至少写：本版修了什么（对照 `out/RELEASE.md` 的「改了什么」表）、buildId 是否变化（变了要提醒首次启动会重解包）、已知限制
+- **坏包不发 Release**：已知启动失败的版本，台账里标「勿装」，只留档不发布
+- 只改 Flutter / Kotlin 壳层、runtime 未动的版本，buildId 不变，notes 里写明，否则用户以外每次都要重解包
+- 发完把下载链接回填到 `out/RELEASE.md` 的台账表

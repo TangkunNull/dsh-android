@@ -29,9 +29,12 @@
 // ── CI 怎么门禁 ──────────────────────────────────────────────────────────────
 //   1. node impl/tools/sync-plugin.mjs --check          # 插件 vendor 没过期
 //   2. node impl/tools/pack-runtime.mjs --check         # zip 与当前输入一致（buildId 相等）
-//   3. node impl/tools/pack-runtime.mjs --verify        # 闭包能真的起 profile（gateway/fs/shell 都 ok）
-// 第 2 步拦「改了 profile 但忘了重建 zip」，第 3 步拦「裁多了，运行时要的东西被裁掉」。
-// 因为 buildId 不含时间戳、entry 顺序固定、mtime 固定，第 2 步不会因重建而抖动。
+//   3. node impl/tools/pack-runtime.mjs --gate          # zip 里 node/ 下每个 .mjs 都能 import
+//   4. node impl/tools/pack-runtime.mjs --verify        # 闭包能真的起 profile（gateway/fs/shell 都 ok）
+// 第 2 步拦「改了 profile 但忘了重建 zip」，第 3 步拦「顶层 import 的包没进闭包」，
+// 第 4 步拦「裁多了，运行时要的东西被裁掉」。第 3 步是 0.1.22 真机事故（启动即
+// `Cannot find package 'react-reconciler'`）之后补的：前两步都绿，设备照样起不来。
+// 注意 build() 自己也会跑一次第 3 步 —— 手工打包时不可能忘了它。
 //
 // ── 幂等 ─────────────────────────────────────────────────────────────────────
 // 同一输入两次构建 buildId 必须相同（--check 就是靠这个）。做法：
@@ -42,10 +45,11 @@
 //     SOURCE_DATE_EPOCH 钉死，钉死后连 zip 字节都逐字节可复现。
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import {
   hasUnicodePropertyEscape,
@@ -210,6 +214,37 @@ const PRUNE = [
       + 'contrib/ 扩展（浏览器端渲染场景）都不裁掉就是白占 900 KB。',
     test: (p) => /(^|\/)katex\/dist\/(katex\.(min\.)?js|contrib\/)/.test(p),
   },
+
+  // ── 渲染器三个包带进来的死重（0.1.23） ────────────────────────────────────
+  // react-reconciler / yoga-layout 是这一轮才进闭包的。它们和当年的 zod 一样，
+  // npm 把"运行时不需要的东西"一起发了。三条规则合计约 1.4 MB，是「client 半边
+  // 不超 12 MB」这个约束能继续成立的原因（见报告里的体积账）。
+  {
+    rule: 'react-profiling-builds',
+    why: 'react 与 react-reconciler 的 cjs/ 里各有 *.profiling.js（reconciler 那份 528 KB）。'
+      + 'profiling 构建**不在任何解析路径上**：两个包的 package.json 只有 main index.js，'
+      + '而 index.js 只在 development / production 之间按 NODE_ENV 二选一，没有第三个分支；'
+      + '也没有 exports 字段能让人用子路径摸到它。它是给 React 自己的基准测试用的，'
+      + '设备上没有任何读者。',
+    test: (p) => /(^|\/)react(-reconciler)?\/cjs\/[^/]*\.profiling\.js$/.test(p),
+  },
+  {
+    rule: 'yoga-layout-sources',
+    why: 'yoga-layout 的 package.json 只把 dist/ 暴露出去（main + exports 都指 dist/src/index.js），'
+      + 'src/ 是 TypeScript 与 C++ 源码（embind.cpp、Node.cpp、wrapAssembly.ts…）。'
+      + 'wasm 本体以 base64 内嵌在 dist/binaries/yoga-wasm-base64-esm.js（120 KB），'
+      + '不存在"漏了 .wasm 文件"这回事。与 zod-typescript-sources 同一类。',
+    test: (p) => /(^|\/)yoga-layout\/src\//.test(p),
+  },
+  {
+    rule: 'katex-typescript-sources',
+    why: 'katex/src 是 891 KB 的 TypeScript 源码（Parser.ts / buildTree.ts / symbols.ts…），'
+      + '运行时产物是 dist/katex.mjs（rollup 自包含，除一处注释外不引用 src）。'
+      + '它进包只是因为 npm 的 files 字段把 src/ 一起发了。'
+      + '注意 `exports` 里有 `"./*": "./*"`，理论上能被子路径 import 到 —— 但那是 .ts，'
+      + 'Node 解析不了，本来就没人这么用。',
+    test: (p) => /(^|\/)katex\/src\//.test(p),
+  },
 ];
 
 /** 无论如何都不进裁剪的路径（先于所有规则判定）。 */
@@ -367,6 +402,27 @@ const CLIENT_ROOTS = [
   '@deepseek-ai/schemastery',
   // 下一轮的地基：上游客户端运行时（SlotsService / defineStore / SessionsService）
   '@deepseek-ai/dsh-client-runtime',
+  // ── 渲染器自己（0.1.23 修的洞） ────────────────────────────────────────────
+  // 三个包是**运行期入口的直接依赖**，以前只有 `react` 靠传递关系偶然进来
+  // （primitives 声明了它），另外三个根本不在闭包里 —— 设备上启动第一步就
+  // `ERR_MODULE_NOT_FOUND: Cannot find package 'react-reconciler'`。
+  //
+  // 为什么会漏：`src/` 整棵树会进 runtime（sync-harness-assets.mjs 拷
+  // runtime-src/node/），而 src 里 reconciler.mjs / layout.mjs 的裸 import 属于
+  // **运行期**依赖；它们原先住在 tools/ 时能解析到 impl/node_modules（构建机
+  // 上有全套），搬进 src 之后就只有「闭包里有没有」这一个判据。依赖闭包没跟着
+  // 搬，于是构建全绿、设备起不来。
+  //
+  // 这四条一律写显式，不靠传递：传递关系是 npm 的解析结果，不是我们的契约，
+  // 上游一次 peer 调整就能让它消失。体积见报告里的 client 半边账。
+  'react',
+  'react-reconciler',
+  // react-reconciler 的 peer：它自己 node_modules 里带 0.28，顶层是 0.27
+  // （primitives 那条链要的）。两份都要进 —— 同名不同版本各留一份是既定规则。
+  'scheduler',
+  // src/layout.mjs 用它算 flex 盒子。3.x 的 wasm 以 base64 内置在
+  // dist/binaries/yoga-wasm-base64-esm.js 里，没有独立 .wasm 文件可漏。
+  'yoga-layout',
   // 插件 client 半边在模块顶层 require 的第三方包
   '@tanstack/react-virtual',
   'anser',
@@ -982,6 +1038,154 @@ function extractZip(zipFile, destDir) {
   return entries.length;
 }
 
+// ── 运行期入口的 import 闸门 ─────────────────────────────────────────────────
+// 这道闸门存在的理由只有一个：**「包没打进去」必须在构建机上红**。
+//
+// 0.1.22 的教训：`src/reconciler.mjs` 顶层 `import Reconciler from
+// 'react-reconciler'`，而 CLIENT_ROOTS 里没有这个包。打包脚本一切正常（文件数、
+// 体积、裁剪统计、buildId 都对），APK 也装得上，解包 29 秒也成功 —— 直到真机
+// 起 Node 的那一刻才炸：
+//
+//   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'react-reconciler'
+//   imported from /data/data/ai.dsh.app/files/runtime/node/reconciler.mjs
+//
+// 这条链路上没有任何一个环节会替我们发现它：闭包算法只走 package.json 的
+// dependencies（顶层 import 是代码，不是声明），裁剪规则只删不查，`--verify`
+// 起的是**宿主** profile（`.mjs` 入口一个都不 import）。
+//
+// 做法与取舍：
+//   * 解**刚写出来的 zip**（不是内存里的 entries）到临时目录，用系统 node 对
+//     `node/` 下每个 `.mjs` 真跑一次 `import()`。解析规则与设备完全一致：
+//     `/tmp/x/node/foo.mjs` 里的裸包会向上找到 `/tmp/x/node_modules/`。
+//   * **每个文件一个子进程**。理由有三：a) 一个模块的 import 副作用（计时器、
+//     进程级 hook）污染不了下一个；b) 挂死能被 timeout 杀掉，而不是把整个打包
+//     卡住；c) 失败能精确归到某个文件。47 个文件、几秒钟，完全值得。
+//   * 只 import，不调用任何导出 —— 我们要证的是「模块图能解析」，不是「启动能
+//     跑通」（后者是 `--verify` 的事）。
+//   * 子进程 env 沿用当前 env（**不设 NODE_ENV**）：设备上就是没人设 NODE_ENV，
+//     react / react-reconciler 在那种环境下走 development 分支。构建机跟着走
+//     同一条分支，闸门才算真在验设备上那份代码。
+//
+// 白名单**从空开始**。它的存在只是为了「某个模块 import 时有已知且无法避免的
+// 副作用」这一种情况，每条都要写清原因并打进输出；不是拿来放行漏包的 ——
+// 放过一个漏包，这道闸门就退化成一句声明。
+const IMPORT_GATE_ALLOWLIST = new Map(); // 相对 node/ 的路径 → 跳过原因（当前为空）
+
+/** 单个文件的 import 超时。react-reconciler 冷编译约 100 ms，20 s 是「真挂死」。 */
+const IMPORT_GATE_TIMEOUT_MS = 20_000;
+
+/** 子进程里跑的探针：import 一个 URL，失败就把 code / 缺包名打到 stdout。 */
+const IMPORT_PROBE = `
+const url = process.argv[1];
+try {
+  await import(url);
+} catch (error) {
+  const code = (error && error.code) || (error && error.name) || 'Error';
+  const message = String((error && error.message) || error).replace(/\\s+/g, ' ');
+  const missing = /Cannot find (?:package|module) '([^']+)'/.exec(message);
+  process.stdout.write(JSON.stringify({ ok: false, code, message, missing: missing ? missing[1] : null }) + '\\n');
+  process.exit(3);
+}
+process.stdout.write('{"ok":true}\\n');
+`;
+
+/** 从一条失败信息里抽出「缺的包名」，抽不到返回 null。 */
+function missingPackageOf(code, message) {
+  const m = /Cannot find (?:package|module) '([^']+)'/.exec(message || '');
+  if (m) return m[1];
+  if (code === 'ERR_MODULE_NOT_FOUND') return '(未在报错里出现包名)';
+  return null;
+}
+
+/**
+ * 解开 zip，对 `node/` 下每个 `.mjs` 真跑一次 import。
+ *
+ * @param {object} opts
+ * @param {string} opts.zipPath 刚写出来的 runtime.zip
+ * @param {string} [opts.dir] 解压目录（默认 /tmp 下的固定位置）
+ * @return {{ok: boolean, checked: number, failed: Array, skipped: Array,
+ *            durationMs: number, dir: string, message: string}}
+ */
+function gateRuntimeImports({ zipPath, dir = path.join(os.tmpdir(), 'dsh-runtime-import-gate') }) {
+  const t0 = Date.now();
+  extractZip(zipPath, dir);
+
+  const nodeDir = path.join(dir, 'node');
+  if (!fs.existsSync(nodeDir)) throw new Error(`zip 里没有 node/：${zipPath}`);
+  const entries = [];
+  walkFiles(nodeDir, (sub) => { if (sub.endsWith('.mjs')) entries.push(sub); });
+  entries.sort();
+  if (entries.length === 0) throw new Error('node/ 下一个 .mjs 都没有，闭包算错了');
+
+  const failed = [];
+  const skipped = [];
+  for (const rel of entries) {
+    const reason = IMPORT_GATE_ALLOWLIST.get(rel);
+    if (reason !== undefined) { skipped.push({ file: `node/${rel}`, reason }); continue; }
+
+    const abs = path.join(nodeDir, rel);
+    const r = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--no-warnings', '-e', IMPORT_PROBE, pathToFileURL(abs).href],
+      { cwd: dir, encoding: 'utf8', timeout: IMPORT_GATE_TIMEOUT_MS, env: process.env },
+    );
+    if (r.error && r.error.code === 'ETIMEDOUT') {
+      failed.push({ file: `node/${rel}`, code: 'TIMEOUT', message: `import 超过 ${IMPORT_GATE_TIMEOUT_MS} ms`, missing: null });
+      continue;
+    }
+    if (r.status === 0) continue;
+
+    let parsed = null;
+    for (const line of (r.stdout ?? '').split('\n')) {
+      if (!line.startsWith('{')) continue;
+      try { parsed = JSON.parse(line); } catch { /* 非 JSON 行忽略 */ }
+    }
+    const code = parsed?.code ?? `EXIT_${r.status}`;
+    const message = parsed?.message ?? (r.stderr ?? '').trim().split('\n').slice(-1)[0] ?? '';
+    failed.push({
+      file: `node/${rel}`,
+      code,
+      message,
+      missing: parsed?.missing ?? missingPackageOf(code, message),
+    });
+  }
+
+  const durationMs = Date.now() - t0;
+  const ok = failed.length === 0;
+
+  if (!ok) {
+    const lines = failed.map((f) => {
+      const tail = f.missing === null ? '' : `\n      缺的包：${f.missing}`;
+      return `  ✗ ${f.file}\n      ${f.code}: ${f.message}${tail}`;
+    });
+    return {
+      ok: false,
+      checked: entries.length,
+      failed,
+      skipped,
+      durationMs,
+      dir,
+      message: `运行期入口 import 闸门失败：${failed.length}/${entries.length} 个 .mjs 起不来\n`
+        + `${lines.join('\n')}\n`
+        + `\n这些路径会随 runtime.zip 一起装到设备上，在真机上表现为启动即崩。\n`
+        + `修法：把缺的包加进 CLIENT_ROOTS（client 半边）或 manifest 的 roots（宿主半边），\n`
+        + `然后在 impl 里重装依赖（npm i）后重跑打包。不要往 IMPORT_GATE_ALLOWLIST 里塞 ——\n`
+        + `白名单只留给「import 有已知副作用」的模块。\n`
+        + `（解压目录：${dir}）`,
+    };
+  }
+
+  return {
+    ok: true,
+    checked: entries.length,
+    failed,
+    skipped,
+    durationMs,
+    dir,
+    message: `运行期入口 import 闸门通过：${entries.length} 个 .mjs 全部可解析（${(durationMs / 1000).toFixed(1)} s）`,
+  };
+}
+
 // ── 构建 ─────────────────────────────────────────────────────────────────────
 /**
  * client 半边闭包：从 impl/node_modules 出发。
@@ -1194,6 +1398,20 @@ function build({ modulesDir, outFile = OUT_ZIP, quiet = false }) {
   if (showProgress) process.stdout.write('\r');
 
   const zipBytes = fs.statSync(outFile).size;
+
+  // 闸门必须读**刚写出来的 zip**：它验的就是「装进 APK 的那份产物」，
+  // 内存里的 entries 只是意图。见 gateRuntimeImports 的头注释。
+  const gate = gateRuntimeImports({ zipPath: outFile });
+  if (!quiet) {
+    if (gate.ok) {
+      log(gate.message);
+    } else {
+      // 失败细节走 stderr：构建日志被截断时，缺的包名不能只留在 stdout 里。
+      console.error(`\n${gate.message}`);
+    }
+    for (const s of gate.skipped) log(`  跳过 ${s.file}（白名单）：${s.reason}`);
+  }
+
   const report = {
     buildId,
     builtAt,
@@ -1225,9 +1443,20 @@ function build({ modulesDir, outFile = OUT_ZIP, quiet = false }) {
     },
     missing: closure.missing,
     roots: closure.roots.length,
+    // 运行期入口 import 闸门的结果。红的时候这里就是证据（哪个文件、缺哪个包），
+    // 不用回头翻构建日志。
+    importGate: {
+      ok: gate.ok,
+      checked: gate.checked,
+      failed: gate.failed,
+      skipped: gate.skipped,
+      durationMs: gate.durationMs,
+    },
   };
   writeJson(REPORT_PATH, report);
-  return { report, runtimeJson, zipPath: outFile };
+  // 报告先落盘再抛：失败的证据要留在 .artifacts 里。
+  if (!gate.ok) throw new Error(gate.message);
+  return { report, runtimeJson, zipPath: outFile, gate };
 }
 
 function reportOnly({ modulesDir }) {
@@ -1399,8 +1628,28 @@ console.log('SERVICES', names.map((k) => k + '=' + (ctx.get(k) ? 'ok' : 'MISSING
 await shutdown.shutdown(0);
 `;
 
-function verify({ modulesDir }) {
-  const built = build({ modulesDir });
+/**
+ * 只跑闸门，不重建：对**磁盘上现有的** runtime.zip 做一次运行期入口 import 检查。
+ *
+ * 打包流程里 build() 已经自动跑过一次；这个模式是给「拿到别人构建的 zip」
+ * 「怀疑 APK 里那份有问题」以及本轮那种「解包现有产物验证一次」用的。
+ */
+function gateExisting() {
+  if (!fs.existsSync(OUT_ZIP)) {
+    console.error(`没有 ${path.relative(IMPL, OUT_ZIP)}，先构建：node impl/tools/pack-runtime.mjs`);
+    return 1;
+  }
+  const gate = gateRuntimeImports({ zipPath: OUT_ZIP });
+  if (gate.ok) {
+    log(gate.message);
+    for (const s of gate.skipped) log(`  跳过 ${s.file}（白名单）：${s.reason}`);
+    return 0;
+  }
+  console.error(gate.message);
+  return 1;
+}
+
+function verify({ modulesDir }) {  const built = build({ modulesDir });
   const dir = verifyTmpDir();
   const n = extractZip(built.zipPath, dir);
   fs.mkdirSync(path.join(dir, 'dsh-home', 'profiles'), { recursive: true });
@@ -1465,6 +1714,8 @@ const USAGE = `用法：node impl/tools/pack-runtime.mjs [选项]
 不带选项      打全量 runtime.zip（默认动作会写盘，请确认参数无误）
   --check             只校验 zip 的 buildId 与当前输入一致，不写盘（CI 门禁用）
   --report            只打印体积统计，不写 zip
+  --report-client     只量 client 半边的体积账（不需要宿主闭包）
+  --gate              只对现有 runtime.zip 跑运行期入口 import 闸门，不重建
   --verify            构建 + 解压到临时目录 + 起一次 profile 自检
   --update-manifest   从 dump 重新生成 runtime-manifest.json
   --modules <dir>     源 node_modules 目录（默认 $DSH_ROOT 或内置路径）
@@ -1476,7 +1727,7 @@ const USAGE = `用法：node impl/tools/pack-runtime.mjs [选项]
 /** 带值选项：这几个会吃掉后面一个 token。 */
 const VALUE_FLAGS = new Set(['--modules', '--dump']);
 /** 纯开关选项。 */
-const BOOL_FLAGS = new Set(['--check', '--verify', '--report', '--report-client', '--update-manifest']);
+const BOOL_FLAGS = new Set(['--check', '--verify', '--report', '--report-client', '--update-manifest', '--gate']);
 
 /**
  * 解析参数并校验，一趟做完。返回 `{ error }` 或 `{ has, opt }`。
@@ -1535,6 +1786,7 @@ function main(argv) {
   }
   if (has('--report-client')) return reportClient();
   if (has('--report')) return reportOnly({ modulesDir });
+  if (has('--gate')) return gateExisting();
   if (has('--check')) return check({ modulesDir });
   if (has('--verify')) return verify({ modulesDir });
 
@@ -1549,6 +1801,7 @@ function main(argv) {
   printPruneTable(r.pruned);
   log(`补丁      ${r.patched.length} 处${r.patched.length === 0 ? '' : ''}`);
   for (const p of r.patched) log(`  · ${p.path}`);
+  log(`闸门      ${r.importGate.checked} 个运行期入口 .mjs 全部可 import（${(r.importGate.durationMs / 1000).toFixed(1)} s）`);
   log(`报告      ${path.relative(IMPL, REPORT_PATH)}`);
   return 0;
 }

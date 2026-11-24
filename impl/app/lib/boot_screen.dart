@@ -9,6 +9,7 @@ import 'dart:ui' show FontFeature;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'app_info.dart';
 import 'boot_progress.dart';
 import 'dsh_tokens.dart';
 import 'host_boot.dart';
@@ -25,8 +26,10 @@ import 'unix_bridge.dart';
 ///     摆一张九步清单，反而像卡住了。
 ///
 /// 数据来源只有两个，都是原生侧已有的通道，没有为这个页面新增协议：
-///   * `HostBootstrap.readLog()`   —— harness.log 尾部（16 KB）
+///   * `HostBootstrap.readLog()`   —— harness.log（轮询只要尾部 16 KB，下载要全文）
 ///   * `HostBootstrap.readStatus()` —— status.json（解包 done/total 的兜底）
+/// 失败时还有第三个出口：`HostBootstrap.saveLog()` 把日志（或日志为空时的诊断
+/// 文本）写进「下载」，见 [_BootScreenState._downloadLog]。
 class BootScreen extends StatefulWidget {
   /// 桥是否已建立。加载页只读它，不负责连接。
   final ValueListenable<UnixHarnessBridge?> host;
@@ -44,6 +47,9 @@ class _BootScreenState extends State<BootScreen> {
   Timer? _timer;
   bool _busy = false;
   bool _entering = false;
+
+  /// 「下载日志」正在进行：按钮置灰 + 转圈，挡掉连点造成的多份文件。
+  bool _savingLog = false;
 
   /// null = 还没问到。问到 false 就是快速启动，永远不进清单模式 ——
   /// 这样界面不会先闪一下清单再切走。
@@ -219,7 +225,8 @@ class _BootScreenState extends State<BootScreen> {
                             error: _snapshot.error.isEmpty
                                 ? '启动失败'
                                 : _snapshot.error,
-                            onShowLog: _showLog,
+                            saving: _savingLog,
+                            onDownloadLog: _downloadLog,
                           ),
                         ],
                         const SizedBox(height: 18),
@@ -243,44 +250,44 @@ class _BootScreenState extends State<BootScreen> {
     );
   }
 
-  /// 失败时的日志入口。放在 State 上而不是面板里：`showModalBottomSheet` 要
-  /// 在 await 之后判断页面还在不在，只有 State 有 `mounted`（Flutter 3.0 的
-  /// BuildContext 还没有这个 getter）。
-  Future<void> _showLog() async {
-    final log = await HostBootstrap.readLog();
-    if (!mounted) return;
-    final t = DshTokens.of(context);
-    final lines = log.split(RegExp(r'\r?\n'));
-    final tail = lines.length > 80 ? lines.sublist(lines.length - 80) : lines;
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: t.bgBase,
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('harness.log（最后 ${tail.length} 行）',
-                style: TextStyle(
-                    fontSize: DshTokens.fontSecondary, color: t.labelPrimary)),
-            const SizedBox(height: 10),
-            Expanded(
-              child: SingleChildScrollView(
-                child: SelectableText(
-                  tail.join('\n'),
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    height: 1.45,
-                    fontFamily: 'monospace',
-                    color: t.labelSecondary,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+  /// 失败时的日志出口：把日志**写到用户能拿到的目录**，而不是在界面上开一个
+  /// 只会显示几行的浮层。
+  ///
+  /// 为什么改：0.1.22 上点「查看日志」什么都不会发生 —— 那时把日志尾巴塞进
+  /// 底部浮层，而失败发生在运行时写出第一行之前（起 Node 时 `MODULE_NOT_FOUND`），
+  /// 尾巴是空的，浮层里就只有一行标题，看起来像按钮坏了。用户要的是「把日志
+  /// 拿出来发给你们」，那就直接落盘并告诉他落在哪。
+  ///
+  /// 日志为空时**不保存空文件**：改为拼一段诊断文本（九步状态 + 原始 status +
+  /// 错误），让用户手里的文件一定带信息。文件名与落点都由原生侧决定（Android
+  /// 10+ 走 MediaStore 写 `下载/DSH Android/`），Dart 只显示原生返回的路径。
+  Future<void> _downloadLog() async {
+    if (_savingLog) return; // 连点会生成好几份文件
+    setState(() => _savingLog = true);
+    try {
+      final log = await HostBootstrap.readLog(maxChars: 0);
+      final text = log.trim().isEmpty
+          ? buildBootDiagnostics(
+              snapshot: _snapshot,
+              rawStatus: _rawStatus,
+              now: DateTime.now(),
+            )
+          : log;
+      final saved = await HostBootstrap.saveLog(text: text, name: logFileName());
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger == null) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(saved.ok
+              ? '日志已保存到 ${saved.path}'
+              : '保存失败：${saved.error}'),
+          duration: const Duration(seconds: 6),
+        ));
+    } finally {
+      if (mounted) setState(() => _savingLog = false);
+    }
   }
 
   /// 解包占整体一半：它是最长的一段（冷启动 30-40 秒），如果按"九步里完成
@@ -300,6 +307,86 @@ class _BootScreenState extends State<BootScreen> {
 
 /// 启动页状态行里"装配阶段"那句，与桌面客户端一致。
 const String kLoadingPlugins = 'Loading plugins...';
+
+/// 两位补零。Dart 2.17 没有 `NumberFormat`，标准库的 padLeft 就够。
+String _two(int v) => v.toString().padLeft(2, '0');
+
+/// `2026-11-24 10:22:43`（**设备本地时区**，不用 UTC：用户要对上「文件」App
+/// 里的时间，也要对上这份文件名）。
+String _localStamp(DateTime t) =>
+    '${t.year}-${_two(t.month)}-${_two(t.day)} '
+    '${_two(t.hour)}:${_two(t.minute)}:${_two(t.second)}';
+
+/// 日志文件名：`dsh-log-yyyyMMdd-HHmmss.txt`。
+///
+/// 时间戳在 Dart 侧算、在原生侧还会再兜一层（原生拿到空名或没有扩展名时自己
+/// 按同样的格式生成），因为「重名不覆盖」的判定只能在真正落盘的那一侧做。
+String logFileName([DateTime? at]) {
+  final t = at ?? DateTime.now();
+  return 'dsh-log-${t.year}${_two(t.month)}${_two(t.day)}'
+      '-${_two(t.hour)}${_two(t.minute)}${_two(t.second)}.txt';
+}
+
+/// 把阶段名固定成英文短词，方便在工单里 grep（UI 文案会改，这些不会）。
+const Map<BootPhase, String> _phaseNames = <BootPhase, String>{
+  BootPhase.pending: 'pending',
+  BootPhase.running: 'running',
+  BootPhase.done: 'done',
+  BootPhase.warning: 'warning',
+  BootPhase.failed: 'failed',
+};
+
+/// 日志为空时保存的那份文本。
+///
+/// **为什么需要它**：0.1.22 的失败点在「启动 Node 运行时」——运行时在写出第一行
+/// 日志之前就死了（`ERR_MODULE_NOT_FOUND`），所以 `harness.log` 是空的。空文件
+/// 对排障毫无价值，而「保存了一份空文件」还会让用户以为日志真的什么都没有。
+/// 这份文本替代它：九步状态、原始 status、错误原文，都是那一刻 UI 真的看到过的
+/// 事实，不是猜的。
+String buildBootDiagnostics({
+  required BootSnapshot snapshot,
+  required String rawStatus,
+  required DateTime now,
+  String version = appVersion,
+}) {
+  final out = <String>[
+    'dsh-android 启动诊断',
+    '生成时间：${_localStamp(now)}（设备本地时区）',
+    '版本：$version',
+    '',
+    '—— 为什么是这份文本 ——',
+    'harness.log 为空：运行时在写出第一行之前就失败了。',
+    '下面是启动页当时看到的全部状态，请连同本文件一起反馈。',
+    '',
+    '—— 九步状态 ——',
+  ];
+  if (snapshot.steps.isEmpty) {
+    out.add('（还没读到任何一步 —— 首帧就失败了）');
+  } else {
+    for (final s in snapshot.steps) {
+      final detail = s.detail.isEmpty ? '' : '  ${s.detail}';
+      out.add('${s.id.padRight(9)}${(_phaseNames[s.phase] ?? 'unknown').padRight(9)}'
+          '${s.title}$detail');
+    }
+  }
+  out
+    ..add('')
+    ..add('—— 解包进度 ——')
+    ..add(snapshot.progress == null
+        ? '未知（没有 done/total）'
+        : '${(snapshot.progress! * 100).round()}%')
+    ..add('')
+    ..add('—— 原始 status（HostBootstrap.status） ——')
+    ..add(rawStatus.isEmpty ? '（空）' : rawStatus)
+    ..add('')
+    ..add('—— 错误 ——')
+    ..add(snapshot.error.isEmpty ? '（没有捕获到错误文本）' : snapshot.error)
+    ..add('')
+    ..add('—— 界面连接 ——')
+    ..add(snapshot.bridgeConnected ? '已连接' : '未连接')
+    ..add('');
+  return out.join('\n');
+}
 
 /// 启动页那一行状态。
 ///
@@ -682,10 +769,17 @@ class _PhaseIcon extends StatelessWidget {
 class _FailurePanel extends StatelessWidget {
   final DshTokens t;
   final String error;
-  final VoidCallback onShowLog;
 
-  const _FailurePanel(
-      {required this.t, required this.error, required this.onShowLog});
+  /// 正在写文件：按钮置灰并显示转圈，避免连点生成多份日志。
+  final bool saving;
+  final VoidCallback onDownloadLog;
+
+  const _FailurePanel({
+    required this.t,
+    required this.error,
+    required this.saving,
+    required this.onDownloadLog,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -717,14 +811,34 @@ class _FailurePanel extends StatelessWidget {
               ),
               const Spacer(),
               TextButton(
-                onPressed: onShowLog,
+                onPressed: saving ? null : onDownloadLog,
                 style: TextButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   minimumSize: const Size(0, 28),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                child: Text('查看日志',
-                    style: TextStyle(fontSize: DshTokens.fontCaption)),
+                child: saving
+                    ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 11,
+                            height: 11,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.5,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                  t.labelTertiary),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text('正在保存…',
+                              style: TextStyle(
+                                  fontSize: DshTokens.fontCaption,
+                                  color: t.labelTertiary)),
+                        ],
+                      )
+                    : Text('下载日志',
+                        style: TextStyle(fontSize: DshTokens.fontCaption)),
               ),
             ],
           ),

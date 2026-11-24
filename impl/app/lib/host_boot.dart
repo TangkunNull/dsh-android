@@ -220,13 +220,71 @@ class HostBootstrap {
     }
   }
 
-  /// Tail of the runtime log, for the settings screen's diagnostics row.
-  static Future<String> readLog() async {
+  /// harness.log 的尾部。状态页每秒读一次，所以缺省只要最后 16 KB ——
+  /// 整份搬运会把一次「刷新一行字」变成一次几 MB 的字符串拷贝。
+  ///
+  /// [maxChars] 传 0 表示要全文（原生侧封顶 2 MB 并在截断时首行注明），
+  /// 「下载日志」走这条；UI 轮询保持缺省值。
+  static Future<String> readLog({int maxChars = 16384}) async {
     if (!isSupported) return '';
     try {
-      return await channel.invokeMethod<String>('log') ?? '';
+      return await channel.invokeMethod<String>(
+            'log',
+            <String, dynamic>{'maxChars': maxChars},
+          ) ??
+          '';
     } catch (_) {
       return '';
     }
   }
+
+  /// 把一段文本写进用户看得见的目录（Android 10+ 落 `下载/DSH Android/`）。
+  ///
+  /// 为什么不静默失败：0.1.22 的「查看日志」点了没反应，用户拿不到任何东西，
+  /// 也就没法把问题带回来。这里把成功路径与失败原因都做成返回值，由 UI 直接
+  /// 显示 —— 保存日志这件事的价值全在「用户能把文件发给我们」。
+  static Future<LogSave> saveLog({
+    required String text,
+    required String name,
+  }) async {
+    if (!isSupported) return const LogSave.failed('当前平台没有原生日志目录');
+    try {
+      final path = await channel.invokeMethod<String>(
+        'saveLog',
+        <String, dynamic>{'text': text, 'name': name},
+      );
+      if (path == null || path.isEmpty) {
+        return const LogSave.failed('原生侧没有返回保存位置');
+      }
+      return LogSave.saved(path);
+    } on MissingPluginException {
+      // 装了旧版壳层时会出现：方法在 Dart 侧存在、原生侧没有。
+      return const LogSave.failed('当前安装的原生壳层不支持保存日志');
+    } on PlatformException catch (e) {
+      return LogSave.failed(e.message?.isNotEmpty == true ? e.message! : e.code);
+    } catch (e) {
+      return LogSave.failed('$e');
+    }
+  }
+}
+
+/// [HostBootstrap.saveLog] 的结果：拿到路径就是成功，拿到原因就是失败。
+///
+/// 不用「返回 null 表示失败 + 抛异常表示另一种失败」：调用方只关心
+/// 「显示哪句话」，一个值带两种含义会让 UI 里长出两个分支。
+class LogSave {
+  /// 原生侧返回的展示用路径（`下载/DSH Android/dsh-log-….txt`）。
+  final String? path;
+
+  /// 失败原因（可读中文，直接显示）。
+  final String? error;
+
+  const LogSave.saved(String this.path) : error = null;
+
+  const LogSave.failed(String this.error) : path = null;
+
+  bool get ok => path != null;
+
+  @override
+  String toString() => ok ? 'LogSave($path)' : 'LogSave.failed($error)';
 }
