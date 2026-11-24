@@ -61,7 +61,9 @@ class HostBootstrap {
     Timer? ticker;
     try {
       final paths = await channel.invokeMapMethod<String, dynamic>('paths');
-      status.value = '正在启动 agent';
+      // 与桌面客户端一致的装配文案；不 import boot_screen.dart 取常量，
+      // 那会让底层 host 模块反向依赖 UI 层（boot_screen 已经 import 了本文件）。
+      status.value = 'Loading plugins...';
       await channel.invokeMethod<bool>('startHarness');
 
       // Progress: the native side polls readiness, but it only learns *how far*
@@ -124,6 +126,34 @@ class HostBootstrap {
     }
   }
 
+  /// 直接读一次 endpoint 文件，**不等待、不轮询**。
+  ///
+  /// 用途只有一个：桥的握手被拒之后，确认运行时有没有重新发布过 endpoint
+  /// （token 每个 node 进程重新生成，服务被系统重启后旧 token 就对不上了）。
+  ///
+  /// 刻意不复用 [ensureRunning]：它内部走 `awaitReady`，那个要阻塞到就绪或
+  /// 超时（默认 240 s）；在「重试一次握手」这条路上，那是把一次毫秒级重连变成
+  /// 一次两分钟的假死。
+  static Future<HostEndpoint?> readEndpoint() async {
+    if (!isSupported) return null;
+    try {
+      final raw = await channel.invokeMapMethod<String, dynamic>('endpoint');
+      if (raw == null) return null;
+      final socket = raw['socket'] as String? ?? '';
+      final token = raw['token'] as String? ?? '';
+      if (socket.isEmpty || token.isEmpty) return null;
+      return HostEndpoint(
+        socketPath: socket,
+        token: token,
+        pid: (raw['pid'] as int?) ?? -1,
+      );
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Maps the raw status file onto the human-facing [status] string.
   static void _applyStatus(Map<dynamic, dynamic>? raw) {
     if (raw == null) return;
@@ -137,11 +167,13 @@ class HostBootstrap {
             : '正在解压运行时';
         break;
       case 'starting':
-        status.value = '正在启动 agent';
+        // 与桌面客户端一致的装配文案（见上方 startHarness 前的同名赋值）。
+        status.value = 'Loading plugins...';
         break;
       case 'running':
         // node is up but the socket is not published yet; awaitReady covers it.
-        status.value = '正在连接 agent';
+        // 这一段同样是「解包完成 → 界面连上」之间的装配窗口，同一规则。
+        status.value = 'Loading plugins...';
         break;
       case 'failed':
         status.value = '启动失败：${(message is String && message.isNotEmpty) ? message : '未知原因'}';
@@ -164,6 +196,27 @@ class HostBootstrap {
       if (_booting) _applyStatus(snapshot);
     } finally {
       _refreshing = false;
+    }
+  }
+
+  /// 这次启动是否需要解包运行时。
+  ///
+  /// 只有首次安装与 APK 升级后为 true（展开 16 453 个文件，30-40 秒）；平时
+  /// 启动是 false，一两秒就能连上。加载页据此决定显示完整清单还是极简启动态 ——
+  /// 不该让每天都要开一次 App 的人看九步进度。
+  ///
+  /// 返回 null 表示问不到（桌面 / 测试 / 通道异常）：调用方按"可能需要解包"
+  /// 处理，宁可多显示一次清单，也不要白屏。
+  static Future<bool?> needsUnpack() async {
+    if (!isSupported) return null;
+    try {
+      final info = await channel.invokeMapMethod<String, dynamic>('bootInfo');
+      final value = info?['needsUnpack'];
+      return value is bool ? value : null;
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 

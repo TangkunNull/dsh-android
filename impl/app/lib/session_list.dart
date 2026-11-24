@@ -9,6 +9,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'brand_mark.dart';
 import 'dsh_tokens.dart';
 
 class SessionSummary {
@@ -94,40 +95,40 @@ class _SessionListScreenState extends State<SessionListScreen> {
   @override
   Widget build(BuildContext context) {
     final t = DshTokens.of(context);
+    // 窄屏不再套一个「会话」大标题的 AppBar：原版侧栏顶部就是品牌行，
+    // 多一个标题会把整块内容压下去，看起来像另一个页面。设置入口挪到品牌行
+    // 右侧，和桌面侧栏收起时的位置一致。
     final panel = widget.embedded
         ? ColoredBox(color: t.sidebarFill, child: _panel(context, t))
         : Scaffold(
-            appBar: AppBar(
-              title: const Text('会话'),
-              actions: [
-                IconButton(
-                  key: const Key('open-settings'),
-                  icon: const Icon(Icons.settings_outlined, size: 20),
-                  onPressed: widget.onOpenSettings,
-                ),
-              ],
-            ),
-            body: _panel(context, t),
+            backgroundColor: t.sidebarFill,
+            body: SafeArea(child: _panel(context, t)),
           );
     return panel;
   }
 
   Widget _panel(BuildContext context, DshTokens t) {
     final items = _filtered;
-    return Column(
+    // 原版侧栏根容器就是 6px 上下 / 8px 左右的内边距（`--dsh-sidebar-inline-padding`
+    // 实测是 8px）。子元素不再各自加左右边距：新建按钮、搜索框、列表项的左缘
+    // 自然对齐在同一条线上。唯一的例外是品牌行 —— 上游 `logoRow` 另带 8px 左
+    // 内边距，鲸鱼因此落在 16px，见 `_brand`。
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      child: Column(
       children: [
-        if (widget.embedded) _brand(context, t),
+        _brand(context, t),
         if (widget.header != null) widget.header!,
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
           child: _newSessionButton(context, t),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 2),
+          padding: const EdgeInsets.fromLTRB(4, 0, 4, 2),
           child: _searchField(t),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 14, 4),
+          padding: const EdgeInsets.fromLTRB(8, 8, 6, 4),
           child: Row(
             children: [
               Text(
@@ -159,47 +160,43 @@ class _SessionListScreenState extends State<SessionListScreen> {
           _settingsRow(context, t),
         ],
       ],
+      ),
     );
   }
 
-  /// 品牌行。原版是「鱼形 mark + dsh + 版本徽章」，这里用文字 mark 加一行
-  /// 版本号 —— 图标是另一套资产，缺了它也不该空着一个方块。
+  /// 品牌行。原版 `logoRow` 是固定 60px 高、内容靠左，里面装的是
+  /// `sidebar.brand.mark`（`FishLogo`）+ `sidebar.brand.name`
+  /// （`BrandWordmark includeMark: false`），两个图形各自 `size=24`、间距 5px。
+  ///
+  /// 之前这里是一个 24×24 的黑色圆角方块 + `Icons.bolt` + 文本 `dsh` ——
+  /// 方向和原版一致（左标右字），但图形完全是自己画的，跟原版不是一个东西。
+  /// 现在两个图形都在 `brand_mark.dart` 里按上游 SVG 逐字复刻。
   Widget _brand(BuildContext context, DshTokens t) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 12, 6),
+    return SizedBox(
+      height: 60,
       child: Row(
         children: [
-          Container(
-            width: 22,
-            height: 22,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: t.labelPrimary,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Icon(Icons.bolt, size: 14, color: t.bgBase),
-          ),
-          const SizedBox(width: 9),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'dsh',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.2,
-                  color: t.labelPrimary,
-                ),
-              ),
-              Text(
-                '0.1.0-p3',
-                style: TextStyle(fontSize: 9.5, height: 1.2, color: t.labelTertiary),
-              ),
-            ],
+          // 上游 `logoRow` 自己还带一层左内边距：
+          //   `.hHd-Xa_logoRow{…height:60px;padding:8px 0 8px 8px}`
+          // 加上侧栏根的 `padding:6px var(--dsh-sidebar-inline-padding)`（8px），
+          // 鲸鱼的左缘落在 **16px**。原版就是这样，和下面的列表项并不共线 ——
+          // 别为了「对齐好看」把这 8px 拿掉，那是自创几何。
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            // 原版的 logoRow 就是"图形贴左 + 右侧按钮靠右"，中间的空白由剩余
+            // 空间吸收；不要套 Flexible/FittedBox —— 那会让 Row 把可用宽度按
+            // flex 分给品牌，图形被等比缩小（实测 185 → 112，看着像另一个尺寸）。
+            child: BrandIdentity(tokens: t),
           ),
           const Spacer(),
+          if (!widget.embedded && widget.onOpenSettings != null)
+            IconButton(
+              key: const Key('open-settings'),
+              icon: Icon(Icons.settings_outlined, size: 18, color: t.labelTertiary),
+              onPressed: widget.onOpenSettings,
+              tooltip: '设置',
+              visualDensity: VisualDensity.compact,
+            ),
           if (widget.onCollapse != null)
             IconButton(
               key: const Key('sidebar-collapse'),
@@ -213,31 +210,34 @@ class _SessionListScreenState extends State<SessionListScreen> {
     );
   }
 
-  /// 原版的 New Session 是一条窄的幽灵按钮：hover 才有底色，键盘聚焦时右边
-  /// 露出快捷键。这里保留「+hint」的形状，因为一眼能看出它是动作而不是标题。
+  /// 原版的 New Session 是一条 38px 高的描边按钮：底色比侧栏略亮、0.5px 边框、
+  /// 内容居中，不是一条「幽灵链接」。之前是 34px 无边框加左对齐，看着像列表
+  /// 里的一行；高度和边框齐了之后才像按钮。
   Widget _newSessionButton(BuildContext context, DshTokens t) {
     return SizedBox(
-      height: 34,
+      height: 38,
       child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(DshTokens.radiusSm),
+        color: t.bgLayer2,
+        borderRadius: BorderRadius.circular(DshTokens.radiusMd),
         child: InkWell(
           key: const Key('new-session'),
-          borderRadius: BorderRadius.circular(DshTokens.radiusSm),
+          borderRadius: BorderRadius.circular(DshTokens.radiusMd),
           onTap: widget.onCreate == null ? null : () => unawaited(widget.onCreate!()),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9),
             decoration: BoxDecoration(
-              color: t.navActive,
-              borderRadius: BorderRadius.circular(DshTokens.radiusSm),
+              border: Border.all(color: t.borderL3, width: DshTokens.hairline),
+              borderRadius: BorderRadius.circular(DshTokens.radiusMd),
             ),
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.add, size: 15, color: t.labelPrimary),
+                Icon(Icons.add, size: 16, color: t.labelPrimary),
                 const SizedBox(width: 6),
                 Text(
                   '新建会话',
-                  style: TextStyle(fontSize: DshTokens.fontSecondary, color: t.labelPrimary, fontWeight: FontWeight.w500),
+                  style: TextStyle(fontSize: 14, color: t.labelPrimary, fontWeight: FontWeight.w500),
                 ),
               ],
             ),

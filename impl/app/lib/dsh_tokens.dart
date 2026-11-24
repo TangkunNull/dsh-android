@@ -304,6 +304,10 @@ class DshTokens {
   Color get labelCaption => raw('--dsw-alias-label-caption');
   Color get link => raw('--dsw-alias-link');
 
+  /// 品牌色。启动画面的转圈弧用它，不是 label-primary —— 桌面版 CSS 写的是
+  /// `--dsw-alias-brand-primary`，两者在暗色下同为 #F9FAFB，亮色下才有差别。
+  Color get brandPrimary => raw('--dsw-alias-brand-primary');
+
   // — 描边与状态 ————————————————————————————————————————
   Color get borderL1 => raw('--dsw-alias-border-l1');
   Color get borderL2 => raw('--dsw-alias-border-l2');

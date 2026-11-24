@@ -30,7 +30,16 @@ abstract class HarnessBridge {
   ///
   /// 事件流只承载「后端推过来的东西」，一次性结果（会话列表、模型目录）走
   /// 这里 —— 否则调用方要在事件流里自己认 id，等于把协议搬回 Dart。
-  Future<Map<String, dynamic>> request(Map<String, dynamic> command);
+  ///
+  /// `timeout` 可调：后端 boot 期间这类命令会被 harness 挂住等待（见
+  /// `bridge-server.mjs:249` 的 `whenGateway`），预算要按场景给。`sessions`
+  /// 等的是 gateway attach（实测 8–15 秒、慢设备 25 秒），它自己传 20 秒 ——
+  /// 数字依据写在 `session_repository.dart` 里，改之前先读那段。
+  /// 注意超时只管「连上了却不回」：连不上时桥会立即拒（`bridge-down`）。
+  Future<Map<String, dynamic>> request(
+    Map<String, dynamic> command, {
+    Duration timeout = const Duration(seconds: 20),
+  });
 
   void dispose() {}
 }
