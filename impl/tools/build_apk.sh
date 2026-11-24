@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 TangkunNull  https://github.com/TangkunNull/dsh-android
+# AGPL-3.0：可商用，但衍生必须开源；闭源商用需取得授权，见 COMMERCIAL.md。
+
 # 构建两个 app 模块，并校验那些「错了也不报错」的点。
 #
 #   bash impl/tools/build_apk.sh            # 探针宿主 ai.dsh.probe（默认，行为与旧版一致）
@@ -36,6 +40,14 @@ trap cleanup EXIT
 
 # ── 探针宿主（默认目标，逻辑保持原样）───────────────────────────────────────
 build_probe() {
+  # 默认 release：out/ 里的名字是 dsh-probe-<版本>-release.apk，构建就不该是
+  # debug —— 体积差 30 MB（85 vs 54），对分发和台账都没意义。debug 只在需要
+  # 逐行断点时用。
+  local mode=release
+  case "${1:-}" in
+    debug|release) mode=$1; shift ;;
+  esac
+
   export JAVA_HOME=${JAVA_HOME:-/root/.sdkman/candidates/java/current}
   export ANDROID_HOME=${ANDROID_HOME:-/root/android-tools/sdk}
   export ANDROID_SDK_ROOT="$ANDROID_HOME"
@@ -46,11 +58,18 @@ build_probe() {
   step "harness assets in sync with src/"
   node "$here/sync-harness-assets.mjs" --check
 
-  step "gradle :app:assembleDebug (探针宿主 ai.dsh.probe)"
-  cd "$android"
-  "$GRADLE" :app:assembleDebug --console=plain "$@"
+  if [ "$mode" = release ]; then
+    task=:app:assembleRelease
+    apk="$android/app/build/outputs/apk/release/app-release.apk"
+  else
+    task=:app:assembleDebug
+    apk="$android/app/build/outputs/apk/debug/app-debug.apk"
+  fi
 
-  apk="$android/app/build/outputs/apk/debug/app-debug.apk"
+  step "gradle $task (探针宿主 ai.dsh.probe)"
+  cd "$android"
+  "$GRADLE" "$task" --console=plain "$@"
+
   [ -f "$apk" ] || fail "APK not produced"
 
   work=$(mktemp -d)
@@ -155,12 +174,43 @@ build_probe() {
   "$AAPT2" dump xmltree "$apk" --file AndroidManifest.xml \
     | grep -A4 "E: service" | grep -E "HarnessService|:harness" | sed 's/^/  /'
 
+  # 产物落 out/。此前这个分支只打印路径，out/ 里的探针包是手工 cp 的 ——
+  # 于是"脚本能构建"和"out/ 里那个包是谁编的"两件事脱节，台账上的哈希没法复现。
+  ver=$(sed -n "s/^ *versionName '\([^']*\)'$/\1/p" "$android/app/build.gradle" | head -1)
+  if [ "$mode" = release ]; then
+    outname="dsh-probe-${ver:-unknown}-release.apk"
+  else
+    outname="dsh-probe-debug.apk"
+  fi
+  step "复制产物到 out/$outname"
+  mkdir -p "$here/../../out"
+  cp -f "$apk" "$here/../../out/$outname"
+
   echo
   echo "APK: $apk ($(du -h "$apk" | cut -f1))"
+  echo "OUT: $here/../../out/$outname"
 }
 
 # ── Flutter 壳（主产品）────────────────────────────────────────────────────
 build_flutter() {
+  local mode=${1:-debug}
+  case "$mode" in
+    debug|release) ;;
+    *) fail "用法：build_apk.sh flutter [debug|release]（默认 debug）" ;;
+  esac
+
+  # 0) 版本号必须与探针一致。两个 APK 包名不同、versionCode 各自单调，但
+  #    versionName 是"同一次构建"的标签：真机报告写 0.1.16，主应用也必须是
+  #    0.1.16，否则"这版修了什么"对不上装的是哪个包。靠人记迟早跑偏，所以
+  #    这里直接比对 pubspec 与 probe 的 build.gradle。
+  step "版本号与探针一致"
+  probe_ver=$(sed -n "s/^ *versionName '\([^']*\)'$/\1/p" "$android/app/build.gradle" | head -1)
+  flutter_ver=$(sed -n 's/^version: *\([0-9][^+]*\).*/\1/p' "$flutter_app/pubspec.yaml" | head -1)
+  [ -n "$probe_ver" ] || fail "读不到 probe 的 versionName（impl/android/app/build.gradle）"
+  [ "$probe_ver" = "$flutter_ver" ] \
+    || fail "版本号不一致：probe=$probe_ver，flutter=$flutter_ver —— 把 pubspec 的 version 改成 $probe_ver"
+  echo "  ok    $probe_ver（probe 与 flutter 相同）"
+
   # 1) JDK 17。机器默认是 20，Gradle 7.6.3 不支持；它报的是
   #    "Unsupported class file major version 64"，跟 JDK 三个字毫无关系。
   step "检查 JDK 17"
@@ -201,11 +251,12 @@ build_flutter() {
 
   # 5) 构建。--target-platform 不能省：缺了它 Flutter 会请求 armeabi_v7a_debug
   #    的引擎构件，本机缓存里没有，报错是一堆下载失败。
-  step "flutter build apk --debug --target-platform android-arm64"
+  step "flutter build apk --$mode --target-platform android-arm64"
   [ -x /opt/flutter/bin/flutter ] || fail "没有 /opt/flutter/bin/flutter"
-  ( cd "$flutter_app" && /opt/flutter/bin/flutter build apk --debug --target-platform android-arm64 )
+  ( cd "$flutter_app" && /opt/flutter/bin/flutter build apk --"$mode" --target-platform android-arm64 \
+      --dart-define=APP_VERSION="$flutter_ver" )
 
-  apk="$flutter_app/build/app/outputs/flutter-apk/app-debug.apk"
+  apk="$flutter_app/build/app/outputs/flutter-apk/app-$mode.apk"
   [ -f "$apk" ] || fail "Flutter APK not produced: $apk"
 
   work=$(mktemp -d)
@@ -231,6 +282,11 @@ build_flutter() {
 
   # 5b) libnode.so 在。62 MB 的那个（strip 后），缺了整个宿主就是空壳。
   #     符号表没了不影响运行：dynsym 里 napi_*/node::* 全在，-lnode 链接与 dlsym 照常。
+  #
+  # llvm-readelf 在这里就要定好：下面 5b/5d 两段都用它，早先只在 5d 定义，
+  # 结果 5b 在 `set -u` 下先撞 unbound variable —— 门禁还没跑就先死了。
+  READELF="${ANDROID_SDK_ROOT}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+  [ -x "$READELF" ] || READELF=$(command -v llvm-readelf) || fail "找不到 llvm-readelf"
   echo
   echo "== libnode.so present"
   [ -f "$libdir/libnode.so" ] || fail "lib/arm64-v8a/libnode.so missing"
@@ -261,8 +317,6 @@ build_flutter() {
   #     了，而 AGP 7.4 又钉住了 Flutter 版本）。把它当硬门禁等于这条分支永远红。
   echo
   echo "== page alignment (16 KB): 自家 4 个 .so 必须 0x4000"
-  READELF="$ANDROID_SDK_ROOT/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-  [ -x "$READELF" ] || READELF=$(command -v llvm-readelf)
   bad=0
   for lib in libnode.so libdsh_node.so libc++_shared.so libdsh-sandbox-runner.so libdsh_pty.so; do
     f="$libdir/$lib"
@@ -311,18 +365,29 @@ build_flutter() {
   fi
 
   # 6) 产物落 out/，与探针的 out/dsh-app-debug.apk 并排。
-  step "复制产物到 out/dsh-flutter-debug.apk"
+  #    release 带版本号（对外分发的那个名字），debug 不带（每天都在变）。
+  if [ "$mode" = release ]; then
+    outname="dsh-android-$flutter_ver-release.apk"
+  else
+    outname="dsh-android-debug.apk"
+  fi
+  step "复制产物到 out/$outname"
   mkdir -p "$here/../../out"
-  cp -f "$apk" "$here/../../out/dsh-flutter-debug.apk"
+  cp -f "$apk" "$here/../../out/$outname"
 
   echo
   echo "APK: $apk ($(du -h "$apk" | cut -f1))"
-  echo "OUT: $here/../../out/dsh-flutter-debug.apk"
+  echo "OUT: $here/../../out/$outname"
 }
 
 # ── 参数分派 ───────────────────────────────────────────────────────────────
 # 第一个参数只认 probe/flutter/all；其他一律当 gradle 参数传给探针，
 # 这样 `build_apk.sh --stacktrace` 这类旧用法不会突然变成「未知目标」。
+#   probe [mode]     诊断壳（ai.dsh.probe）→ out/dsh-probe-<版本>-release.apk
+#                    mode 取 release（默认）或 debug
+#   flutter [mode]   主应用（ai.dsh.app）→ out/dsh-android-<版本>-release.apk
+#                    mode 取 debug（默认）或 release
+#   all              探针 release + 主应用 debug + 主应用 release
 target=probe
 case "${1:-}" in
   probe|flutter|all) target=$1; shift ;;
@@ -330,6 +395,6 @@ esac
 
 case "$target" in
   probe)   build_probe "$@" ;;
-  flutter) build_flutter ;;
-  all)     build_probe "$@"; build_flutter ;;
+  flutter) build_flutter "$@" ;;
+  all)     build_probe; build_flutter debug; build_flutter release ;;
 esac

@@ -68,6 +68,9 @@ const MANIFEST_PATH = path.join(PROFILE_DIR, 'runtime-manifest.json');
 const VENDOR_PLUGIN_DIR = path.join(PROFILE_DIR, 'node_modules', '@dsh-android', 'sandbox');
 // node-pty 的替换包：同一套接口，底下是 libdsh_pty.so。见 pty-shim/index.js 的头注释。
 const PTY_SHIM_DIR = path.join(ANDROID, 'pty-shim');
+/** react-dom 的运行时替身（见 android/react-dom-shim/index.js 的注释）。 */
+const REACT_DOM_SHIM_DIR = path.join(ANDROID, 'react-dom-shim');
+const REACT_DOM_SHIM_FILES = ['package.json', 'index.js'];
 const PTY_SHIM_FILES = ['package.json', 'index.js'];
 
 // 会话全文搜索的替换实现：同一个 service，底下是线性扫描而不是 SQLite FTS。
@@ -135,6 +138,77 @@ const PRUNE = [
     rule: 'sourcemaps',
     why: '本项目没有 JS 调试器，.map 没有任何读者',
     test: (p) => /\.map$/.test(p),
+  },
+
+  // ── client 半边裁剪（本轮新增） ────────────────────────────────────────────
+  // 这三条是「12 MB 净增量」这个预算的主要来源。全量装进来是 19 MB 左右
+  // （@shikijs/langs 11 + katex 4.4 + shiki 4.0），裁完约 6 MB。
+  {
+    rule: 'shikijs-langs-unused',
+    why: '@shikijs/langs 全量 11 MB / 361 个语言，primitives 只 import 三个：'
+      + 'typescript（CodeBlock）、shellscript（TerminalBlock）、json（JsonTree）。'
+      + '其余 358 个 .mjs 与它们的 .d.mts 全部裁掉；裸入口 dist/index.mjs 也裁 —— '
+      + '它 re-export 全部语言，留着就是一颗"import 到就 ENOENT"的地雷，'
+      + '裁掉后错误信息是清楚的 MODULE_NOT_FOUND。',
+    test: (p) => /(^|\/)@shikijs\/langs\/dist\//.test(p)
+      && !/(typescript|shellscript|json)\.(mjs|d\.mts)$/.test(p),
+  },
+  {
+    rule: 'shiki-unused-bundles',
+    why: 'shiki 的 dist 里有两类用不到的东西：dist/langs/*（按语言拆的 chunk，'
+      + '我们走 @shikijs/langs 显式传语言）与 bundle-full/bundle-web（把全部语言与主题'
+      + '打死的整包）。宿主只用 shiki/core + shiki/engine/javascript。',
+    test: (p) => /(^|\/)shiki\/dist\/(langs\/|bundle-|langs-bundle-)/.test(p),
+  },
+  {
+    rule: 'katex-fonts',
+    why: 'katex 的 woff2/ttf 字体（1.2 MB）只对浏览器版式有意义。我们的文本渲染走'
+      + '系统字体，数学公式走 KaTeX 的 HTML 输出，字体文件在这个渲染器里没有读者。',
+    test: (p) => /(^|\/)katex\/dist\/fonts\//.test(p),
+  },
+  {
+    rule: 'react-dom-replaced-by-shim',
+    why: '整个 react-dom（7.7 MB + 它自带的 scheduler）由 android/react-dom-shim 顶替，'
+      + '路径仍是 node_modules/react-dom。理由见那个包的 index.js：这个宿主没有 DOM，'
+      + '设备上真 react-dom 的唯一读者是 @tanstack/react-virtual 的一句 require（只要 '
+      + 'flushSync），而插件自己写的 createPortal 早在宿主 ESM hook 那层就被接住了。'
+      + '真包还要求按 NODE_ENV 选 development/production 两份，设备上没人设 NODE_ENV，'
+      + '只留一份就是运行时 MODULE_NOT_FOUND。替身把这类不确定性一起消掉。',
+    test: (p) => /(^|\/)react-dom\//.test(p),
+  },
+  {
+    rule: 'zod-typescript-sources',
+    why: 'zod 包里的 src/（2.9 MB TypeScript 源码）在运行时没有读者，产物是 index.cjs / index.js。'
+      + '它之所以进包是因为 npm 把 src 一起发了。',
+    test: (p) => /(^|\/)zod\/src\//.test(p),
+  },
+  {
+    rule: 'zod-v3-legacy-tree',
+    why: '插件用的是 zod 4 的 API（`z.record(k, v)` / `z.json()`），import 的是裸 "zod"。'
+      + 'v3 兼容树（604 KB）只有显式 import "zod/v3" 才走得到，已 grep 全量插件确认无人使用。'
+      + '万一将来有插件要它，报错是清楚的 MODULE_NOT_FOUND: zod/v3。',
+    test: (p) => /(^|\/)zod\/v3\//.test(p),
+  },
+  {
+    rule: 'shikijs-themes-unused',
+    why: '@shikijs/themes 是 1.8 MB 的预制主题集。primitives 只 import '
+      + '"shiki/core" 与 "shiki/engine/javascript"，配色来自我们自己的 tokens；'
+      + '没有一处按名字取主题。',
+    test: (p) => /(^|\/)@shikijs\/themes\/(?!package\.json)/.test(p),
+  },
+  {
+    rule: 'shikijs-oniguruma-unused',
+    why: 'oniguruma 引擎（wasm/textmate 那套）是 shiki 的另一条引擎路线。primitives 显式'
+      + 'import 的是 "shiki/engine/javascript"（纯 JS 正则引擎，为了在 --with-intl=none 的'
+      + 'libnode 上不依赖 wasm），所以 engine-oniguruma 与 vscode-textmate 没有入口。',
+    test: (p) => /(^|\/)(@shikijs\/engine-oniguruma|@shikijs\/vscode-textmate)\//.test(p),
+  },
+  {
+    rule: 'katex-browser-bundles',
+    why: 'katex 的 dist 里同时有 ESM（katex.mjs）、UMD（katex.js）与压缩 UMD（katex.min.js）。'
+      + '唯一读者是 primitives 的 ESM `import "katex"`，走 katex.mjs；两个 UMD 版本与 '
+      + 'contrib/ 扩展（浏览器端渲染场景）都不裁掉就是白占 900 KB。',
+    test: (p) => /(^|\/)katex\/dist\/(katex\.(min\.)?js|contrib\/)/.test(p),
   },
 ];
 
@@ -265,7 +339,54 @@ const EXPRESSION_ROOTS = [
   '@deepseek-ai/dsh-sandbox-local',
 ];
 const BUNDLE_ROOTS = ['@deepseek-ai/dsh-base'];
-// 这些包由本仓库提供，不在上游 node_modules 里：闭包计算要把它们当根，但不能
+
+// ── client 半边闭包（本轮新增） ──────────────────────────────────────────────
+// 为什么要它：设备上的界面过去是**构建期快照**（assets/slots.json），插件的
+// React 树根本没有进包。要让插件在设备上真跑（下一轮），宿主就得在设备上持有
+// 一个能渲染它们的 React 环境 —— 也就是这一串包。
+//
+// 它们的来源与宿主不同：宿主闭包从 `--modules`（dsh 的安装目录）算，而这几个包
+// 装在本仓库的 impl/node_modules 里（见 package.json 的 dependencies）。所以闭包
+// 要算两遍再从各自的 node_modules 根拼起来。
+const CLIENT_MODULES = path.join(IMPL, 'node_modules');
+/**
+ * client 半边的体积预算（压缩前）。
+ *
+ * 12 MB 是这一轮定的线：全量装进来约 19 MB（@shikijs/langs 11 + katex 4.4 +
+ * shiki 4.0），裁完约 6 MB。留一倍余量是因为「下一轮真要渲染插件时还会加包」，
+ * 而 APK 体积是不可逆的 —— 先把线画在这里，超了必须在这份报告里说明原因。
+ */
+const CLIENT_BUDGET_BYTES = 12 * 1024 * 1024;
+const CLIENT_ROOTS = [
+  // 组件库与插槽核心：插件 import 的就是它们
+  '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/cosmokit',
+  '@deepseek-ai/schemastery',
+  // 下一轮的地基：上游客户端运行时（SlotsService / defineStore / SessionsService）
+  '@deepseek-ai/dsh-client-runtime',
+  // 插件 client 半边在模块顶层 require 的第三方包
+  '@tanstack/react-virtual',
+  'anser',
+  'clsx',
+  'katex',
+  'mdast-util-from-markdown',
+  'mdast-util-gfm',
+  'mdast-util-math',
+  'micromark-core-commonmark',
+  'micromark-extension-gfm',
+  'micromark-extension-math',
+  'micromark-factory-space',
+  'micromark-util-character',
+  'micromark-util-classify-character',
+  'micromark-util-sanitize-uri',
+  'micromark-util-symbol',
+  'shiki',
+  '@shikijs/langs',
+  'zod',
+];// 这些包由本仓库提供，不在上游 node_modules 里：闭包计算要把它们当根，但不能
 // 去 modulesDir 找（否则报「缺失」并让打包失败）。
 const VENDORED_ROOTS = ['@dsh-android/sandbox', '@dsh-android/session-query'];
 // `@deepseek-ai/dsh/profile-boot` 是宿主的启动入口（runProfile），但没有任何包依赖它，
@@ -400,8 +521,8 @@ function buildManifest({ dumpPath, modulesDir }) {
  *   * 同名但版本不同 → 两份都收。裁掉会让某些包拿到另一份 API 不同的实现，
  *     这种错误在启动时表现为「某个方法不存在」，极难定位。
  */
-function resolveClosure({ modulesDir, manifest }) {
-  const roots = [
+function resolveClosure({ modulesDir, manifest, roots: explicitRoots = null, soft = false }) {
+  const roots = explicitRoots ?? [
     ...manifest.roots.live,
     ...(manifest.roots.expression ?? []),
     ...(manifest.roots.bundles ?? []),
@@ -417,6 +538,7 @@ function resolveClosure({ modulesDir, manifest }) {
   const visitedDirs = new Set();
   const packages = [];
   const missing = [];
+  const softMissing = [];
 
   while (queue.length > 0) {
     const { name, from, required } = queue.shift();
@@ -424,7 +546,7 @@ function resolveClosure({ modulesDir, manifest }) {
     if (!dir) {
       // optional / peer 缺失是常态（sharp 的 20 个平台包、宿主提供的 peer），
       // 只有 dependencies 缺失才意味着闭包真的不完整。
-      if (required && !isVendored.has(name)) missing.push(name);
+      if (required && !isVendored.has(name)) (soft ? softMissing : missing).push(name);
       continue;
     }
     if (visitedDirs.has(dir)) continue;
@@ -446,7 +568,12 @@ function resolveClosure({ modulesDir, manifest }) {
   }
 
   packages.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
-  return { packages, missing: [...new Set(missing)].sort(), roots };
+  return {
+    packages,
+    missing: [...new Set(missing)].sort(),
+    softMissing: [...new Set(softMissing)].sort(),
+    roots,
+  };
 }
 
 function findPackage(name, from) {
@@ -465,7 +592,7 @@ function findPackage(name, from) {
  * 把闭包 + 插件 + profile + 宿主资产展开成 entry 列表，并在展开时应用裁剪规则。
  * entry 只有两类来源：磁盘文件（abs）或内存数据（data，只有 runtime.json 用）。
  */
-function collectEntries({ closure, modulesDir, includeProfileAssets = true }) {
+function collectEntries({ closure, modulesDir, includeProfileAssets = true, patches = true }) {
   const entries = [];
   const pruneStats = new Map();
   let totalFiles = 0;
@@ -511,6 +638,19 @@ function collectEntries({ closure, modulesDir, includeProfileAssets = true }) {
     if (!fs.existsSync(abs)) throw new Error(`缺少 PTY 替换包文件 ${abs}`);
     const size = fs.statSync(abs).size;
     entries.push({ path: `node_modules/node-pty/${f}`, abs });
+    totalFiles += 1;
+    totalBytes += size;
+  }
+
+  // 2b-2) react-dom 替身：上面那条 prune 规则把真包整个裁掉了，这里以同名的
+  //       包补回一个只有语义、没有 DOM 的实现。路径必须是 node_modules/react-dom ——
+  //       @tanstack/react-virtual 的 CJS 里写的就是 `require("react-dom")`，
+  //       包名是对外的唯一契约（与 pty-shim 顶替 node-pty 完全同一个套路）。
+  for (const f of REACT_DOM_SHIM_FILES) {
+    const abs = path.join(REACT_DOM_SHIM_DIR, f);
+    if (!fs.existsSync(abs)) throw new Error(`缺少 react-dom 替身文件 ${abs}`);
+    const size = fs.statSync(abs).size;
+    entries.push({ path: `node_modules/react-dom/${f}`, abs });
     totalFiles += 1;
     totalBytes += size;
   }
@@ -578,7 +718,7 @@ function collectEntries({ closure, modulesDir, includeProfileAssets = true }) {
   }
 
   if (!includeProfileAssets) {
-    patchStats = applyPatches(entries);
+    patchStats = patches ? applyPatches(entries) : [];
     entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     return { entries, pruneStats: sortPrune(pruneStats), totalFiles, totalBytes, patched: patchStats };
   }
@@ -593,7 +733,11 @@ function collectEntries({ closure, modulesDir, includeProfileAssets = true }) {
     totalBytes += size;
   }
 
-  // 4) 宿主资产：harness.js + node/host/**（源在 runtime-src/，产物只进 zip）
+  // 4) 宿主资产：harness.js + node/**（源在 runtime-src/，产物只进 zip）。
+  //    `slots` 命令把插件加载/渲染链（plugin.mjs、reconciler、esm hooks…）带进了
+  //    运行期，sync-harness-assets.mjs 现在整树拷贝 src/ → runtime-src/node/，
+  //    这里按目录相对路径原样收进 zip：node/host/bridge-server.mjs 仍在原位
+  //    （harness.js 的加载路径），新增的 node/plugin.mjs 等与它相对一致。
   const harnessJs = path.join(SRC_DIR, 'harness.js');
   if (!fs.existsSync(harnessJs)) throw new Error(`缺少 ${harnessJs}`);
   const hSize = fs.statSync(harnessJs).size;
@@ -601,10 +745,10 @@ function collectEntries({ closure, modulesDir, includeProfileAssets = true }) {
   totalFiles += 1;
   totalBytes += hSize;
 
-  const hostDir = path.join(SRC_DIR, 'node', 'host');
-  if (!fs.existsSync(hostDir)) throw new Error(`缺少 ${hostDir}`);
-  walkFiles(hostDir, (sub, abs, size) => {
-    entries.push({ path: `node/host/${sub}`, abs });
+  const nodeDir = path.join(SRC_DIR, 'node');
+  if (!fs.existsSync(nodeDir)) throw new Error(`缺少 ${nodeDir}`);
+  walkFiles(nodeDir, (sub, abs, size) => {
+    entries.push({ path: `node/${sub}`, abs });
     totalFiles += 1;
     totalBytes += size;
   }, (sub) => sub);
@@ -839,8 +983,69 @@ function extractZip(zipFile, destDir) {
 }
 
 // ── 构建 ─────────────────────────────────────────────────────────────────────
+/**
+ * client 半边闭包：从 impl/node_modules 出发。
+ *
+ * `soft: true` 是关键。`@deepseek-ai/dsh-client-runtime` 的 package.json 声明了
+ * 15 个宿主包（dsh-agent / dsh-llm / dsh-session…），这些在 impl/node_modules 里
+ * 没有，也**不该**由它带进来 —— 宿主那一半已经在主闭包里了，client 半边只用它们的
+ * 类型。所以这里缺依赖只记账、不失败，否则整个打包会因为一个无关的声明停摆。
+ *
+ * 还有一条硬规则：**只收物理上位于 impl/node_modules 里的包**。测试脚手架
+ * （tools/dsh-resolve.mjs）会在 impl 里给 dsh 安装补一层符号链接，如果不看
+ * realpath，同一个仓库在"跑过测试"和"没跑过测试"两种状态下会量出 9.9 MB 和
+ * 12.7 MB 两个数字 —— 而这两个数字都不是代码变出来的。
+ */
+function resolveClientClosure() {
+  if (!fs.existsSync(CLIENT_MODULES)) {
+    throw new Error(`缺少 client 半边依赖：${CLIENT_MODULES}\n先在 impl 里跑 npm i（见 package.json）`);
+  }
+  const raw = resolveClosure({
+    modulesDir: CLIENT_MODULES,
+    manifest: { roots: { live: [], entryPackages: [], vendored: [] } },
+    roots: CLIENT_ROOTS,
+    soft: true,
+  });
+  const root = fs.realpathSync(CLIENT_MODULES);
+  const packages = [];
+  const hostProvided = [];
+  for (const pkg of raw.packages) {
+    let real;
+    try {
+      real = fs.realpathSync(pkg.dir);
+    } catch {
+      real = pkg.dir;
+    }
+    if (real.startsWith(`${root}${path.sep}`)) packages.push(pkg);
+    else hostProvided.push(pkg.rel);
+  }
+  return { ...raw, packages, hostProvided };
+}
+
 function buildEntries({ modulesDir, manifest }) {
-  const closure = resolveClosure({ modulesDir, manifest });
+  const host = resolveClosure({ modulesDir, manifest });
+  const client = resolveClientClosure();
+
+  // 合并两份闭包。同一个 zip 内路径只能有一个主人：宿主那份优先（它才是设备上
+  // 真正被 require 的实现），client 这份只补宿主没有的包。同名不同版本的情况
+  // 只可能出现在 react / scheduler 这类两边都有的基础包上，保留宿主那份是正确
+  // 选择 —— 客户端的 reconciler 与宿主共用同一个 react 实例才不会出现两份 hooks。
+  const seen = new Set(host.packages.map((p) => p.rel));
+  const added = [];
+  const skipped = [];
+  for (const pkg of client.packages) {
+    if (seen.has(pkg.rel)) { skipped.push(pkg.rel); continue; }
+    seen.add(pkg.rel);
+    added.push(pkg);
+  }
+  const closure = {
+    packages: [...host.packages, ...added].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)),
+    missing: host.missing,
+    softMissing: client.softMissing,
+    roots: [...host.roots, ...client.roots],
+    client: { roots: client.roots.length, packages: added.length, skipped: skipped.length, softMissing: client.softMissing },
+  };
+
   if (closure.missing.length > 0) {
     throw new Error(
       `闭包里这些 dependencies 在 ${modulesDir} 找不到（闭包不完整，打出来的 zip 起不来）：\n  ` +
@@ -848,7 +1053,24 @@ function buildEntries({ modulesDir, manifest }) {
     );
   }
   const collected = collectEntries({ closure, modulesDir });
-  return { closure, ...collected };
+
+  // 「client 半边到底贡献了多少字节」必须单独记账：整个 zip 的增量里混着宿主
+  // 依赖的自然漂移，混在一起就没法判断这一轮加的东西值不值这个体积。
+  // 按 entry 的 zip 内路径前缀归属，统计裁剪后的真实落盘大小。
+  const clientRels = added.map((p) => `${p.rel}/`);
+  let clientBytes = 0;
+  let clientFiles = 0;
+  for (const e of collected.entries) {
+    const rel = e.path.startsWith('node_modules/') ? e.path.slice('node_modules/'.length) : e.path;
+    if (!clientRels.some((r) => rel.startsWith(r))) continue;
+    clientBytes += e.data ? e.data.length : fs.statSync(e.abs).size;
+    clientFiles += 1;
+  }
+  return {
+    closure,
+    ...collected,
+    clientStats: { ...closure.client, files: clientFiles, bytes: clientBytes },
+  };
 }
 
 function isoNow() {
@@ -921,7 +1143,7 @@ function build({ modulesDir, outFile = OUT_ZIP, quiet = false }) {
   const manifest = loadManifest();
   const t0 = Date.now();
   const {
-    closure, entries, pruneStats, totalFiles, totalBytes: rawTotalBytes, patched, regex, buildId,
+    closure, entries, pruneStats, totalFiles, totalBytes: rawTotalBytes, patched, regex, buildId, clientStats,
   } = prepareEntries({ modulesDir, manifest });
 
   // 转译改了内容长度，manifest 里的 bytes 必须按转译后的实际大小算。
@@ -990,6 +1212,17 @@ function build({ modulesDir, outFile = OUT_ZIP, quiet = false }) {
       residualInComments: regex.residual,
     },
     patched: PATCHES.map((p) => ({ path: p.path, why: p.why })),
+    // client 半边（渲染插件用的 React 环境）单独记账，见 CLIENT_ROOTS 的注释。
+    client: {
+      roots: clientStats.roots,
+      packages: clientStats.packages,
+      files: clientStats.files,
+      bytes: clientStats.bytes,
+      skipped: clientStats.skipped,
+      softMissing: clientStats.softMissing.length,
+      budgetBytes: CLIENT_BUDGET_BYTES,
+      overBudget: clientStats.bytes > CLIENT_BUDGET_BYTES,
+    },
     missing: closure.missing,
     roots: closure.roots.length,
   };
@@ -1000,7 +1233,7 @@ function build({ modulesDir, outFile = OUT_ZIP, quiet = false }) {
 function reportOnly({ modulesDir }) {
   const manifest = loadManifest();
   const t0 = Date.now();
-  const { closure, pruneStats, totalFiles, totalBytes, patched } = buildEntries({ modulesDir, manifest });
+  const { closure, pruneStats, totalFiles, totalBytes, patched, clientStats } = buildEntries({ modulesDir, manifest });
   const prunedBytes = pruneStats.reduce((s, r) => s + r.bytes, 0);
 
   const top = closure.packages
@@ -1014,6 +1247,13 @@ function reportOnly({ modulesDir }) {
   log(`闭包        ${closure.packages.length + (manifest.roots.vendored ?? []).length} 包（缺 ${closure.missing.length}：${closure.missing.slice(0, 4).join(', ')}${closure.missing.length > 4 ? ' …' : ''}）`);
   log(`裁剪后      ${totalFiles} 文件 / ${mb(totalBytes)} MB`);
   log(`裁掉        ${pruneStats.reduce((s, r) => s + r.files, 0)} 文件 / ${mb(prunedBytes)} MB`);
+  log('');
+  log(`client 半边 ${clientStats.packages} 包 / ${clientStats.files} 文件 / ${mb(clientStats.bytes)} MB`
+    + `（预算 ${mb(CLIENT_BUDGET_BYTES)} MB，${clientStats.bytes > CLIENT_BUDGET_BYTES ? '超了' : '未超'}）`);
+  if (clientStats.skipped) log(`            宿主已有的 ${clientStats.skipped} 个同名包跳过（保留宿主那份）`);
+  if (clientStats.softMissing.length) {
+    log(`            软缺 ${clientStats.softMissing.length} 个（client 包声明了但宿主那边才有的依赖，预期内）`);
+  }
   log('');
   log('每规则省下：');
   printPruneTable(pruneStats);
@@ -1032,9 +1272,87 @@ function reportOnly({ modulesDir }) {
     bytes: totalBytes,
     prunedBytes,
     pruned: pruneStats,
+    client: { ...clientStats, budgetBytes: CLIENT_BUDGET_BYTES, overBudget: clientStats.bytes > CLIENT_BUDGET_BYTES },
     top,
   });
   return 0;
+}
+
+/**
+ * 只量 client 半边：进包前的真实字节数，以及每条裁剪规则省了多少。
+ *
+ * 为什么单独有这一个模式：完整 zip 需要宿主闭包（`--modules` 指向 dsh 的安装
+ * 目录），而 CI/开发机上经常只有本仓库的 node_modules。client 半边的体积是
+ * **这一轮唯一的体积变量**（宿主闭包只跟着上游 dsh 变），所以它值多少、裁在哪，
+ * 必须能在一个只有 impl/node_modules 的环境里单独量出来。
+ */
+/**
+ * client 半边的体积账：`{ packages, files, bytes, pruned, perPackage }`。
+ *
+ * 抽出来是给 `tools/pack-client.test.mjs` 用的 —— 12 MB 预算只有当它能被一个
+ * 不依赖宿主闭包的测试守住时才算数，否则"这次没超"只是一句话。
+ */
+export function computeClientStats() {
+  const client = resolveClientClosure();
+  const closure = {
+    packages: client.packages, missing: [], roots: client.roots, softMissing: client.softMissing,
+  };
+  const collected = collectEntries({
+    closure, modulesDir: CLIENT_MODULES, includeProfileAssets: false, patches: false,
+  });
+  // 只统计 client 闭包自己的条目。collectEntries 还会顺手塞进 pty-shim /
+  // session-query / vendor/prebuilt / intl-polyfill 这些与 client 半边无关的东西，
+  // 把它们算进"净增量"会让这个数字既不可比也不可信。
+  const clientRels = client.packages.map((p) => `node_modules/${p.rel}/`);
+  const mine = collected.entries.filter((e) => clientRels.some((r) => e.path.startsWith(r)));
+  const files = mine.length;
+  const bytes = mine.reduce((n, e) => n + (e.data ? e.data.length : fs.statSync(e.abs).size), 0);
+
+  const perPackage = client.packages.map((p) => ({ rel: p.rel, raw: dirBytes(p.dir), kept: 0 }));
+  const byRel = new Map(perPackage.map((r) => [`node_modules/${r.rel}/`, r]));
+  for (const e of mine) {
+    const hit = [...byRel.entries()].find(([prefix]) => e.path.startsWith(prefix));
+    if (hit) hit[1].kept += fs.statSync(e.abs).size;
+  }
+  perPackage.sort((a, b) => b.kept - a.kept);
+
+  return {
+    packages: client.packages.length,
+    roots: client.roots.length,
+    softMissing: client.softMissing,
+    files,
+    bytes,
+    rawBytes: perPackage.reduce((s, r) => s + r.raw, 0),
+    pruned: collected.pruneStats,
+    perPackage,
+    budgetBytes: CLIENT_BUDGET_BYTES,
+    overBudget: bytes > CLIENT_BUDGET_BYTES,
+  };
+}
+
+function reportClient() {
+  const stats = computeClientStats();
+  const prunedBytes = stats.pruned.reduce((s, r) => s + r.bytes, 0);
+
+  log('');
+  log(`client 半边 ${stats.packages} 包（根 ${stats.roots}，软缺 ${stats.softMissing.length}）`);
+  log(`裁剪前      ${mb(stats.rawBytes)} MB`);
+  log(`裁剪后      ${stats.files} 文件 / ${mb(stats.bytes)} MB`);
+  log(`裁掉        ${stats.pruned.reduce((s, r) => s + r.files, 0)} 文件 / ${mb(prunedBytes)} MB`);
+  log(`预算        ${mb(CLIENT_BUDGET_BYTES)} MB → ${stats.overBudget ? '超了' : '未超'}`);
+  if (stats.softMissing.length) {
+    log(`软缺        ${stats.softMissing.slice(0, 6).join(', ')}${stats.softMissing.length > 6 ? ' …' : ''}`);
+  }
+  log('');
+  log('每包（裁剪后）：');
+  for (const r of stats.perPackage) log(`  ${mb(r.kept).padStart(7)} MB  ${r.rel}${r.raw !== r.kept ? `  (原 ${mb(r.raw)} MB)` : ''}`);
+  log('');
+  log('每规则省下：');
+  printPruneTable(stats.pruned);
+  log('');
+
+  writeJson(REPORT_PATH, { mode: 'report-client', ...stats });
+  return stats.overBudget ? 3 : 0;
 }
 
 function dirBytes(dir) {
@@ -1158,7 +1476,7 @@ const USAGE = `用法：node impl/tools/pack-runtime.mjs [选项]
 /** 带值选项：这几个会吃掉后面一个 token。 */
 const VALUE_FLAGS = new Set(['--modules', '--dump']);
 /** 纯开关选项。 */
-const BOOL_FLAGS = new Set(['--check', '--verify', '--report', '--update-manifest']);
+const BOOL_FLAGS = new Set(['--check', '--verify', '--report', '--report-client', '--update-manifest']);
 
 /**
  * 解析参数并校验，一趟做完。返回 `{ error }` 或 `{ has, opt }`。
@@ -1215,6 +1533,7 @@ function main(argv) {
   if (has('--update-manifest')) {
     return updateManifest({ dumpPath: opt('dump', '/tmp/dump.json'), modulesDir });
   }
+  if (has('--report-client')) return reportClient();
   if (has('--report')) return reportOnly({ modulesDir });
   if (has('--check')) return check({ modulesDir });
   if (has('--verify')) return verify({ modulesDir });
@@ -1234,10 +1553,15 @@ function main(argv) {
   return 0;
 }
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (e) {
-  // 预期内的失败（源树不完整、dump 不存在……）只打一行，不打栈：栈只会淹没原因
-  console.error(`\n${e.message}`);
-  process.exitCode = 1;
+// 只有直接运行时才执行 CLI：`tools/pack-client.test.mjs` 要 import 这个文件来
+// 拿 computeClientStats()，而 import 时跑一遍 main() 会把测试进程带进命令行解析。
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
+  try {
+    process.exitCode = main(process.argv.slice(2));
+  } catch (e) {
+    // 预期内的失败（源树不完整、dump 不存在……）只打一行，不打栈：栈只会淹没原因
+    console.error(`\n${e.message}`);
+    process.exitCode = 1;
+  }
 }

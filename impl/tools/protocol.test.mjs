@@ -455,3 +455,40 @@ test('a downlink that never opens does not wedge the connection', wire, async ()
     assert.equal(tr.state.streamsDegraded, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Offline remote must still answer in the wire's own shape.
+//
+// `createRemoteNamespace()` used to resolve `null` when no transport was
+// attached. Every plugin consumer starts with `if (!result.ok)`, so `null`
+// didn't degrade to "no data" — it threw `Cannot read properties of null
+// (reading 'ok')` inside the plugin (ui-cordis inventory, settings-models
+// listProviders). A well-formed failure is what the real wire returns, so the
+// existing error paths handle it.
+// ---------------------------------------------------------------------------
+
+test('没有 transport 时 remote 调用返回合法的 RpcResult 失败，而不是 null', async () => {
+  const { createRemoteNamespace } = await import('../src/host/api-remotes.mjs');
+  const remote = createRemoteNamespace(null);
+  const result = await remote.dynamicCordisRunner.inventory();
+  assert.notEqual(result, null, 'null 会让消费方 `result.ok` 直接抛 TypeError');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'NO_TRANSPORT');
+  assert.match(result.error.message, /dynamicCordisRunner\.inventory/);
+});
+
+test('没有 transport 时 onMissing 只报一次，避免刷屏', async () => {
+  const { createRemoteNamespace } = await import('../src/host/api-remotes.mjs');
+  const seen = [];
+  const remote = createRemoteNamespace(null, { onMissing: (m) => seen.push(m) });
+  await remote.llm.listProviders();
+  await remote.llm.listConfigurableProviders();
+  assert.deepEqual(seen, ['llm.listProviders']);
+});
+
+test('有 transport 时失败/成功回包原样透传，不被 offline 兜底改写', async () => {
+  const { createRemoteNamespace } = await import('../src/host/api-remotes.mjs');
+  const transport = { call: async (method) => ({ ok: true, value: { method } }) };
+  const remote = createRemoteNamespace(transport);
+  assert.deepEqual(await remote.session.list(), { ok: true, value: { method: 'session.list' } });
+});

@@ -3,6 +3,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:dsh_native/brand_mark.dart';
 import 'package:dsh_native/session_list.dart';
 
 SessionSummary s(String id, String title, {String preview = '', DateTime? at}) => SessionSummary(
@@ -120,6 +121,18 @@ void main() {
         header: const Text('BANNER'),
       )));
       expect(find.text('BANNER'), findsOneWidget);
+    });
+
+    testWidgets('品牌行的鲸鱼落在 16px（上游 root 8 + logoRow 8）', (tester) async {
+      // 上游：`.hHd-Xa_root{padding:6px var(--dsh-sidebar-inline-padding)}`（8px）
+      //       + `.hHd-Xa_logoRow{padding:8px 0 8px 8px}` → 鲸鱼左缘 16px。
+      // 这条断言是几何契约的一部分：之前放在 8px（和列表项共线）就是错的，
+      // 原版本来就不共线。
+      await tester.pumpWidget(wrap(SessionListScreen(sessions: sessions)));
+
+      final logo = find.byType(FishLogo);
+      expect(logo, findsOneWidget);
+      expect(tester.getTopLeft(logo).dx, 16);
     });
   });
 }

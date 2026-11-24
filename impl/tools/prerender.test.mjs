@@ -132,3 +132,39 @@ test('抽帧上限：总量超预算时按比例减帧', async () => {
   assert.equal(canvas.canvas.frames.length, 40);
   assert.equal(out.animating, 1);
 });
+
+// --- 序列化路径的两个坑（都是"插件装上了但界面空白"的真凶）------------------
+
+test('多个根节点 + 事件处理器：序列化不能把下标当 handlersOut', async () => {
+  // `nodes.map(serialize)` 会把下标塞进 serialize 的第二个参数，于是任何带
+  // onClick 的组件一序列化就抛 "handlersOut.set is not a function"。
+  // brand-official 这种纯图形包没有事件，所以这个坑一直藏到 message-feedback
+  // 才炸出来 —— 而且它炸在**序列化**里，不在渲染里，onError 收不到。
+  const p = makePlugin(`
+        const A = () => React.createElement('button', { onClick: () => {} }, 'a');
+        const B = () => React.createElement('span', null, 'b');
+        const Root = () => React.createElement(React.Fragment, null,
+          React.createElement(A), React.createElement(B));
+        ctx.slots.register({ name: 'conversation.input.right', id: 'r' }, Root);
+  `);
+  const out = await exportSlots(p, { frames: 1 });
+  const node = out.slots['conversation.input.right'];
+  assert.ok(node, '插槽应该有内容');
+  assert.equal(node.children.length, 2, '两个根节点都要在');
+  assert.ok(node.children[0].on?.press, '事件处理器要落成 on.press -> eventId（EVENTS 把 onClick 映射成 press）');
+  assert.equal(out.renderErrorCount, 0);
+});
+
+test('渲染期抛错被记进 renderErrors，而不是静默变空', async () => {
+  // 组件的 render 抛出时，reconciler 走 onUncaughtError；container 没挂 onError
+  // 时整棵子树变空且一条日志都没有 —— 这一条守的就是"有日志"。
+  const p = makePlugin(`
+        const Boom = () => { throw new Error('useTabs is not a function'); };
+        ctx.slots.register({ name: 'conversation.input.right', id: 'b' }, Boom);
+  `);
+  const out = await exportSlots(p, { frames: 1 });
+  assert.ok(out.renderErrorCount >= 1, '应该记录渲染错误');
+  assert.match(out.renderErrors[0].message, /useTabs is not a function/);
+  assert.equal(out.renderErrors[0].slot, 'conversation.input.right', '错误要带上是哪个插槽');
+  assert.ok(out.renderErrors.length <= 10, '最多回 10 条，别撑爆 IR');
+});

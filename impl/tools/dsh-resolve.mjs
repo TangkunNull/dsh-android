@@ -11,7 +11,7 @@
 // 提供（见 impl/android/profile/README.md）。
 
 import { createRequire } from 'node:module';
-import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdirSync, realpathSync, symlinkSync, lstatSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -48,30 +48,56 @@ export function resolveDshScope() {
 }
 
 /**
- * 确保 impl/node_modules/@deepseek-ai 指向 dsh 的作用域目录。
- * 幂等：已存在且指向同一处时什么都不做；指向别处时报错而不是覆盖（可能是别人
- * 故意装的另一份 dsh）。
+ * 确保 `impl/node_modules/@deepseek-ai` 里的包都解析得到。
+ *
+ * 两种布局都要支持：
+ *   1. **符号链接整个作用域**（旧布局：impl 不声明任何 @deepseek-ai 依赖，测试
+ *      脚手架把整个 scope 链到 dsh 的安装上）；
+ *   2. **真实目录 + 逐包补链**（新布局：package.json 里声明了 primitives /
+ *      cordis / slots / schema-form，它们必须留在本仓库的 node_modules 里；
+ *      而 dsh-sandbox 这类只有 dsh 安装才有的包，逐个链过去）。
+ *
+ * 为什么规则 2 是必须的而不是"顺手支持一下"：声明了依赖之后，整个 scope 就不
+ * 再是符号链接了 —— 旧代码见到真实目录直接报错「already points at ...」，于是
+ * 一个只跟"包从哪来"有关的脚手架问题，被读成"你装错了"。
+ *
+ * 幂等：已存在的条目一律不覆盖（可能是 npm 装的真包，也可能是别人故意放的）。
  */
 export function ensureDshResolvable() {
   const scope = resolveDshScope();
   const linkDir = path.join(IMPL, 'node_modules');
   const link = path.join(linkDir, SCOPE);
-  let current;
+  mkdirSync(linkDir, { recursive: true });
+
+  let stat;
   try {
-    // 断链/不存在都会抛，落到「创建」分支。
-    current = realpathSync(link);
+    stat = lstatSync(link);
   } catch {
-    current = undefined;
+    stat = undefined;
   }
-  if (current !== undefined) {
+
+  if (stat === undefined) {
+    symlinkSync(scope, link, 'dir');
+    return link;
+  }
+
+  if (stat.isSymbolicLink()) {
+    const current = realpathSync(link);
     if (current === realpathSync(scope)) return link;
     throw new Error(
       `sandbox-android: ${link} already points at ${current}, expected ${scope}; ` +
         'remove it (it is a local test scaffold, ignored by git) and rerun',
     );
   }
-  mkdirSync(linkDir, { recursive: true });
-  symlinkSync(scope, link, 'dir');
+
+  // 真实目录：只补 dsh 安装里有、本仓库里没有的包。
+  for (const name of readdirSync(scope)) {
+    const target = path.join(link, name);
+    if (existsSync(target)) continue;
+    try {
+      symlinkSync(path.join(scope, name), target, 'dir');
+    } catch { /* 并发跑两个测试时可能已经被建好了 */ }
+  }
   return link;
 }
 

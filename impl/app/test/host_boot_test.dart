@@ -148,4 +148,47 @@ void main() {
       expect(HostBootstrap.status.value, '启动超时：正在解压运行时 (3500/16452)');
     });
   });
+
+  // 握手被拒之后的重读一次：走的是 `endpoint`（同步读文件），**不能**碰
+  // `awaitReady`（那个会阻塞到就绪或超时，一条重连路径不该卡两分钟）。
+  testWidgets('readEndpoint 只问 endpoint，不触发 awaitReady', (tester) async {
+    mockChannel((method) {
+      switch (method) {
+        case 'endpoint':
+          return <String, Object?>{
+            'socket': '/data/user/0/ai.dsh.app/files/harness.sock',
+            'token': 'tk-2',
+            'pid': 99,
+            'proto': 1,
+          };
+        default:
+          return null;
+      }
+    });
+
+    await asAndroid(() async {
+      final endpoint = await HostBootstrap.readEndpoint();
+
+      expect(endpoint, isNotNull);
+      expect(endpoint!.token, 'tk-2');
+      expect(endpoint.socketPath, '/data/user/0/ai.dsh.app/files/harness.sock');
+      expect(endpoint.pid, 99);
+      expect(calls, <String>['endpoint']);
+    });
+  });
+
+  testWidgets('readEndpoint 拿到半截内容时给 null，不抛', (tester) async {
+    mockChannel((method) {
+      switch (method) {
+        case 'endpoint':
+          return <String, Object?>{'socket': '/x', 'token': ''};
+        default:
+          return null;
+      }
+    });
+
+    await asAndroid(() async {
+      expect(await HostBootstrap.readEndpoint(), isNull);
+    });
+  });
 }

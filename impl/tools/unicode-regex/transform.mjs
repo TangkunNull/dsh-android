@@ -34,6 +34,9 @@ function load() {
 /** 便宜的前置判断：绝大多数文件不含 \p{，不必进 Babel。 */
 export const hasUnicodePropertyEscape = (code) => /\\[pP]\{/.test(code);
 
+/** 被跳过的字符串（不是可重写的 pattern）会记在这里，构建日志可查。 */
+export const skippedStrings = [];
+
 /**
  * 字符串形态的正则：\p{...} 出现在字符串字面量或「无插值模板」里，
  * 最终被 new RegExp(str, flags) 使用。regexpu 直接重写 pattern 文本。
@@ -42,8 +45,23 @@ function stringPatternPlugin() {
   const ESCAPE = /\\[pP]\{/;
   const rewrite = (value) => {
     if (!ESCAPE.test(value)) return null;
-    // 只按 'u' 语义重写：重写结果只含 \u{...} 区间，带不带 u 标志都合法。
-    return rewritePattern(value, 'u', { unicodePropertyEscapes: 'transform' });
+    // 长度闸：真正的 pattern 字符串都很短（几十字符）。shiki 的语言包把整个
+    // TextMate 语法塞进**一个** JSON 字符串字面量（typescript.mjs 100 KB+），
+    // 里面恰好也含 \p{ —— 对它跑 regexpu 既不该（它是数据，运行时经
+    // JSON.parse 后才构造正则，V8 本身认 \p）也跑不动（"Expected atom"）。
+    if (value.length > 2048) {
+      skippedStrings.push({ length: value.length, head: value.slice(0, 60) });
+      return null;
+    }
+    try {
+      // 只按 'u' 语义重写：重写结果只含 \u{...} 区间，带不带 u 标志都合法。
+      return rewritePattern(value, 'u', { unicodePropertyEscapes: 'transform' });
+    } catch (e) {
+      // 解析不了 pattern 的字符串保持原样：它多半不是"直接进 RegExp 的
+      // pattern"，改写失败比改写错误安全。
+      skippedStrings.push({ length: value.length, head: value.slice(0, 60) });
+      return null;
+    }
   };
   return {
     name: 'dsh-unicode-property-in-string',

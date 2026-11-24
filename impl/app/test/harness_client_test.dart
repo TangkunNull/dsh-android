@@ -31,7 +31,10 @@ class FakeBridge implements HarnessBridge {
   /// 记录请求并在测试里显式应答。这个 fake 不模拟 id 关联 —— 那是
   /// `UnixHarnessBridge` 的事，它的测试在 `unix_bridge_test.dart` 里。
   @override
-  Future<Map<String, dynamic>> request(Map<String, dynamic> command) {
+  Future<Map<String, dynamic>> request(
+    Map<String, dynamic> command, {
+    Duration timeout = const Duration(seconds: 20),
+  }) {
     sent.add(command);
     return Future.value({'t': 'ack', 'id': command['id']});
   }

@@ -25,6 +25,12 @@ class FakeNode {
   bool silentWelcome = false;
   bool refuseImmediately = false;
 
+  /// 只接受集合里的 token；空表示不看 token（由 [rejectHandshake] 决定拒/收）。
+  ///
+  /// 用来复刻「运行时换了进程」：旧 token 被拒、新 token 通过 —— 正是 0.1.18
+  /// 真机上「运行时拒绝了握手（token 不匹配）」之后该被救回来的那个场景。
+  final Set<String> goodTokens = {};
+
   static Future<FakeNode> start() async {
     final dir = await Directory.systemTemp.createTemp('dshub-');
     final path = '${dir.path}/s.sock';
@@ -44,6 +50,9 @@ class FakeNode {
       return;
     }
     sockets.add(s);
+    // 断开之后 `push()` 再往这个 socket 写，错误会投递到 `done`；不接住它就是
+    // 一个未处理的异步错误（和桥里 `socket.done.catchError(...)` 同一个理由）。
+    s.done.catchError((Object _) {});
     s.cast<List<int>>().transform(utf8.decoder).transform(const LineSplitter()).listen(
       (line) {
         if (line.trim().isEmpty) return;
@@ -51,7 +60,8 @@ class FakeNode {
         received.add(m);
         if (m['t'] == 'hello') {
           if (silentWelcome) return;
-          if (rejectHandshake) {
+          final badToken = goodTokens.isNotEmpty && !goodTokens.contains(m['token']);
+          if (rejectHandshake || badToken) {
             _write(s, {'t': 'error', 'code': 'handshake', 'message': 'bad token'});
           } else {
             _write(s, {
@@ -358,5 +368,126 @@ void main() {
     expect(e.socket, '/x');
     expect(e.token, 't');
     expect(e.pid, 7);
+  });
+
+  // ── 握手被拒之后的第二道防线 ──────────────────────────────────────────────
+  //
+  // 真机现场：覆盖安装 / 服务被系统重启之后，`filesDir` 里留着上一轮的
+  // endpoint（旧 token），原生侧的就绪判定把它当成本次的返回给 Dart，于是
+  // Dart 拿旧 token 连**新** socket，被 `tokenMatches` 拒。
+  //
+  // 原生侧已经修了就绪判定（MainActivity.awaitReady 的 stale 检查 + 启动前
+  // 清理残留 + 幂等刷新）。这里验证第二道防线：被拒后重读一次 endpoint，
+  // token 变了就用新的重连，界面不该死在「token 不匹配」上。
+  group('handshake rejected → 重读 endpoint', () {
+    test('token 变了：重连成功，在途命令补发，不是 fatal', () async {
+      final node = await FakeNode.start();
+      addTearDown(node.close);
+      node.goodTokens.add('tok-new');
+
+      var reads = 0;
+      final logs = <String>[];
+      final bridge = UnixHarnessBridge(
+        socketPath: node.path,
+        token: 'tok-old',
+        sessionId: 's1',
+        initialBackoff: const Duration(milliseconds: 20),
+        reloadEndpoint: () async {
+          reads += 1;
+          return HarnessEndpoint(socket: node.path, token: 'tok-new');
+        },
+        onLog: (m, [d]) => logs.add(m),
+      );
+      addTearDown(bridge.dispose);
+
+      // 在途命令：握手被拒时它一条都没被执行过（对端在 hello 通过前只回
+      // `expected hello`），所以重连后应该被补发，调用方拿到的是结果而不是
+      // `[bridge-down] 运行时拒绝了握手`。
+      final pending = bridge.request({'t': 'sessions'}, timeout: const Duration(seconds: 3));
+      await settle(400);
+
+      expect(bridge.isFatal, isFalse, reason: '救回来就不该判死');
+      expect(bridge.isReady, isTrue);
+      expect(reads, 1, reason: '只重读一次 endpoint');
+      expect(
+        node.received.where((m) => m['t'] == 'hello').map((m) => m['token']).toList(),
+        ['tok-old', 'tok-new'],
+        reason: '先旧 token 被拒，再用新 token 握一次',
+      );
+      final sent = node.received.where((m) => m['t'] == 'sessions').toList();
+      expect(sent.length, 1, reason: '补发一次，不能重复执行');
+
+      node.push({'t': 'ok', 'id': sent.single['id'], 'v': <dynamic>[]});
+      final reply = await pending;
+      expect(reply['t'], 'ok');
+    });
+
+    test('token 没变：仍然是 fatal，只重读一次', () async {
+      final node = await FakeNode.start();
+      addTearDown(node.close);
+      node.rejectHandshake = true;
+
+      var reads = 0;
+      final events = <Map<String, dynamic>>[];
+      final bridge = UnixHarnessBridge(
+        socketPath: node.path,
+        token: 'tok',
+        sessionId: 's1',
+        reloadEndpoint: () async {
+          reads += 1;
+          return HarnessEndpoint(socket: node.path, token: 'tok');
+        },
+      );
+      addTearDown(bridge.dispose);
+      bridge.events.listen(events.add);
+
+      await bridge.connect();
+      await settle(300);
+
+      expect(bridge.isFatal, isTrue);
+      expect(reads, 1);
+      expect(events.any((e) => e['kind'] == 'failure'), isTrue);
+      expect(node.accepts, 1, reason: 'token 没变就不该重连');
+    });
+
+    test('token 变了但仍被拒：第二次就判死，不再重读', () async {
+      final node = await FakeNode.start();
+      addTearDown(node.close);
+      node.rejectHandshake = true; // 谁都拒
+
+      var reads = 0;
+      final bridge = UnixHarnessBridge(
+        socketPath: node.path,
+        token: 'tok-old',
+        sessionId: 's1',
+        reloadEndpoint: () async {
+          reads += 1;
+          return HarnessEndpoint(socket: node.path, token: 'tok-new');
+        },
+      );
+      addTearDown(bridge.dispose);
+
+      await bridge.connect();
+      await settle(400);
+
+      expect(bridge.isFatal, isTrue);
+      expect(reads, 1, reason: '同一条链上只救一次');
+      expect(node.accepts, 2, reason: '旧 token 一次 + 新 token 一次，然后停');
+    });
+
+    test('没有 endpoint 读取器（桌面/测试）：行为和以前一样，立即 fatal', () async {
+      final node = await FakeNode.start();
+      addTearDown(node.close);
+      node.rejectHandshake = true;
+
+      final bridge = UnixHarnessBridge(socketPath: node.path, token: 'tok', sessionId: 's1');
+      addTearDown(bridge.dispose);
+
+      await bridge.connect();
+      await settle(200);
+
+      expect(bridge.isFatal, isTrue);
+      expect(node.accepts, 1);
+    });
   });
 }
