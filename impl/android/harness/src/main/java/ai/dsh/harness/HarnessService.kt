@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 TangkunNull  https://github.com/TangkunNull/dsh-android
+// AGPL-3.0：可商用，但衍生必须开源；闭源商用需取得授权，见 COMMERCIAL.md。
+
 package ai.dsh.harness
 
 import ai.dsh.runtime.NodeRuntime
@@ -7,6 +11,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -41,7 +46,24 @@ class HarnessService : Service() {
 
     companion object {
         private const val TAG = "DshHarness"
-        private const val CHANNEL_ID = "dsh.harness"
+
+        /**
+         * 通知 channel ID。**带版本号是故意的。**
+         *
+         * Android 的 channel 一旦创建，名字/描述就改不掉了：同 ID 重装也会
+         * 保留第一次创建时的名字（用户看到的是「Agent runtime」而不是
+         * 「DSH 运行时」）。改 ID 才会让系统建一个新的，旧的那个用
+         * [LEGACY_CHANNEL_ID] 顺手删掉。
+         */
+        private const val CHANNEL_ID = "dsh.harness.v2"
+
+        /** 0.1.18 及以前的 channel：只用英文名，改名靠换 ID 而不是改它。 */
+        private const val LEGACY_CHANNEL_ID = "dsh.harness"
+
+        private const val CHANNEL_NAME = "DSH 运行时"
+        private const val CHANNEL_DESCRIPTION = "在后台保持本地运行时存活"
+        private const val NOTIFICATION_TITLE = "DSH Android"
+
         private const val NOTIFICATION_ID = 0x4453
         const val ACTION_START = "ai.dsh.harness.START"
         const val ACTION_STOP = "ai.dsh.harness.STOP"
@@ -143,9 +165,19 @@ class HarnessService : Service() {
     private fun startRuntime() {
         if (running || starting || NodeRuntime.isRunning()) {
             Log.i(TAG, "runtime already running")
+            // 幂等调用。必须顺手刷新一次状态：`awaitReady` 只认「本次等待开始之后
+            // 写的记录」（见 MainActivity 的 stale 判定），而这里根本没写过任何
+            // 东西 —— 文件里是上一次启动留下的 running + 旧 updatedAt。不刷新，
+            // 一个**已经完全就绪**的运行时会被判成「没就绪」，界面白等到超时。
+            //
+            // 只在真的活着时刷新：`starting` 还在解压/起 node 的半路上，那时写
+            // running 是撒谎（endpoint 还不存在，UI 会以为连得上）。
+            if (running || NodeRuntime.isRunning()) refreshRunningStatus()
             return
         }
         starting = true
+        // 先清残留，再写自己的第一行状态。顺序不能反：清理会把 status 删掉。
+        cleanStaleArtifacts()
         // The notification has to exist within a few seconds of
         // startForegroundService, before any of the work below — unpacking
         // 147 MB would otherwise trip the ANR watchdog.
@@ -219,6 +251,63 @@ class HarnessService : Service() {
     }
 
     /**
+     * 真正起 node **之前**，删掉上一次运行留下的三个文件。
+     *
+     * `filesDir` 在覆盖安装、服务被系统重启、用户强杀之后都不会清空：
+     *
+     * * `harness.endpoint.json` —— 里面是**旧 token**。留着它，UI 会读到
+     *   「running + 旧 token」然后拿旧 token 去连新 socket，被 `tokenMatches`
+     *   拒掉（0.1.18 真机的「运行时拒绝了握手」就是这么来的）。
+     * * `harness.status.json` —— 旧 `running` 会让就绪判定抢跑。
+     * * `harness.sock` —— 残留 socket 文件本身会让 `listen()` 撞 EADDRINUSE
+     *   （Node 侧有 unlink 兜底，这里是双保险：兜底发生在 listen 失败之后，
+     *   而那个失败的瞬间 UI 已经看到一个连不上的 socket 了）。
+     *
+     * 只在 `running == false` 的分支调用（见 [startRuntime]）：已经在跑的实例
+     * 的 socket/token 是活的，删文件等于把它的入口拆掉。
+     */
+    private fun cleanStaleArtifacts() {
+        val stale = listOf(
+            File(filesDir, ENDPOINT_NAME),
+            HarnessStatus.file(this),
+            File(filesDir, SOCKET_NAME),
+        )
+        for (file in stale) {
+            if (!file.exists()) continue
+            val removed = runCatching { file.delete() }.getOrDefault(false)
+            if (removed) {
+                Log.i(TAG, "removed stale ${file.name}")
+            } else {
+                // 删不掉不是致命的（端点的 stale 判定还有第二道），但要在日志里
+                // 留一行：否则下一次「握手被拒」就找不到起点。
+                append(true, "[harness] 无法删除残留文件 ${file.name}（就绪判定会按时间戳跳过它）")
+            }
+        }
+    }
+
+    /**
+     * 服务已在运行时被 `startHarness` 再叫一次：把状态重写成「现在」的 running。
+     *
+     * 两件事必须一起做，否则 [HarnessStatus] 与 endpoint 的「成对新鲜度」判定
+     * （`MainActivity.endpointIsFresh`）在幂等这条路上不成立：endpoint 没有
+     * updatedAt，它的新鲜度用文件 mtime 表示；只刷 status 会让它显得比 status
+     * 旧，于是已经就绪的服务被判成没就绪。
+     *
+     * `setLastModified` 只是打时间戳，不改内容 —— node 那一侧的 token 仍在文件
+     * 里原样躺着，这里绝不重写它（重写就可能与 Node 自己的原子替换打架）。
+     */
+    private fun refreshRunningStatus() {
+        HarnessStatus.write(this, HarnessStatus.STATE_RUNNING)
+        val endpoint = File(filesDir, ENDPOINT_NAME)
+        if (endpoint.isFile) {
+            if (!endpoint.setLastModified(System.currentTimeMillis())) {
+                Log.w(TAG, "cannot restamp ${endpoint.name}")
+            }
+        }
+        goForeground("running")
+    }
+
+    /**
      * `DSH_RG_PATH`：只在 binary 真的存在且可执行时才给值。
      *
      * 存在性检查不是多余的：`librg.so` 由 `tools/build_rg.sh` 投放，忘了跑那个
@@ -249,6 +338,26 @@ class HarnessService : Service() {
             arrayOf("DSH_PTY_NATIVE=${lib.absolutePath}")
         } else {
             append(true, "[pty] libdsh_pty.so 不在 nativeLibraryDir，终端不可用（先跑 tools/build_pty.sh）")
+            emptyArray()
+        }
+    }
+
+    /**
+     * `NARB_TRACE`：node-addon-require-builtin 的 dlsym/dlopen 逐符号诊断。
+     *
+     * 默认关。它是排查 narb 加载失败用的（07-harmonyos.md §5），但每次启动会从
+     * native 层打出 150+ 行 E 级日志，同一批符号重复 8 遍 —— 0.1.15 真机报告里
+     * 12.8 KB 日志有 76% 是它，真正的错误反而被埋掉。
+     *
+     * 打开方式：debug 包自动开；release 包需要显式设置 system property
+     * `dsh.debug.narb=1`（adb shell setprop 无效，这是 ART 的属性，不是 Android 属性）。
+     */
+    private fun narbTraceEnv(): Array<String> {
+        val debuggable =
+            (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        return if (debuggable || System.getProperty("dsh.debug.narb") == "1") {
+            arrayOf("NARB_TRACE=1")
+        } else {
             emptyArray()
         }
     }
@@ -360,9 +469,7 @@ class HarnessService : Service() {
                 // native loader 的缓存落到不可写目录时虽有 fallback，但明确指到
                 // workDir/tmp 让它一次成功。
                 "TMPDIR=${File(workDir, "tmp").absolutePath}",
-                // node-addon-require-builtin 加载失败时 NARB_TRACE 会从 native 层
-                // 打出 dlsym/dlopen 的逐符号诊断（真机排查用，见 07-harmonyos.md §5）。
-                "NARB_TRACE=1",
+                *narbTraceEnv(),
                 // Without this the policy falls back to process.cwd(), which is
                 // filesDir — that would put runtime/node_modules and
                 // dsh-home/.credentials.yaml inside the model's writable tree.
@@ -440,17 +547,46 @@ class HarnessService : Service() {
             .filter { it.isFile && !Files.isSymbolicLink(it.toPath()) }
             .sumOf { it.length() }
 
+    /**
+     * 通知栏文案。
+     *
+     * **入参刻意保持英文**：`state` 同时进日志（`[harness] node exited with 0`）
+     * 和状态文件（`HarnessStatus`，Dart 的 `host_boot.dart` 按 `state` 分支）。
+     * 把它改成中文会污染日志解析，所以只在这里做一次「英文 → 中文」的映射，
+     * 未知状态原样带上而不是吞成「运行中」：以后加了新状态，用户至少能截图。
+     */
+    private fun notificationText(state: String): String = when {
+        state == "starting" -> "正在启动本地运行时"
+        state == "running" -> "运行时已就绪"
+        state == "failed to start" -> "运行时启动失败"
+        state == "failed to unpack" -> "运行时解压失败"
+        state == "failed to stage profile" -> "运行时配置准备失败"
+        // "unpacking runtime (1234/16433)" → "正在解压运行时 (1234/16433)"
+        state.startsWith("unpacking runtime (") && state.endsWith(")") ->
+            "正在解压运行时${state.removePrefix("unpacking runtime")}"
+        // "exited (0)" → "运行时已退出（0）"
+        state.startsWith("exited (") && state.endsWith(")") ->
+            "运行时已退出（${state.removePrefix("exited (").removeSuffix(")")}）"
+        else -> "运行时状态：$state"
+    }
+
     private fun goForeground(state: String) {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(CHANNEL_ID) == null) {
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Agent runtime", NotificationManager.IMPORTANCE_LOW)
-                    .apply { description = "Keeps the local agent alive in the background" }
+                NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW)
+                    .apply { description = CHANNEL_DESCRIPTION }
             )
         }
+        // 旧 channel 的名字改不掉（同 ID 重装也保留第一版），所以换了 ID 之后
+        // 旧的那条会一直挂在系统设置里。删掉它，别让用户看到两个「运行时」。
+        if (manager.getNotificationChannel(LEGACY_CHANNEL_ID) != null) {
+            runCatching { manager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
+                .onFailure { Log.w(TAG, "cannot delete legacy channel", it) }
+        }
         val notification: Notification = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("dsh")
-            .setContentText("agent runtime: $state")
+            .setContentTitle(NOTIFICATION_TITLE)
+            .setContentText(notificationText(state))
             // A platform drawable, so the app needs no launcher icon to build.
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setOngoing(true)

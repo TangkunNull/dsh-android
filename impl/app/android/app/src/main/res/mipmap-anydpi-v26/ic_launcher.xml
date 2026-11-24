@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon (API 26+). The foreground is a transparent PNG so the launcher
+  can apply its own mask; the background is a flat colour, which is what the
+  brand mark sits on anyway.
+
+  Replacing the icon: swap every `mipmap-*/ic_launcher.png` and
+  `mipmap-*/ic_launcher_foreground.png`. Foreground art must stay inside the
+  centre 66 of 108 dp — outside that ring the launcher crops it.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

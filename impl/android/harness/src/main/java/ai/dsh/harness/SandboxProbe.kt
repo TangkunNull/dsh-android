@@ -53,6 +53,7 @@ object SandboxProbe {
     private const val UNEXPECTED_EXIT = "probe-unexpected-exit"
     private const val TIMEOUT = "probe-timeout"
     private const val UNPARSEABLE = "probe-unparseable"
+    private const val SIGNALED = "probe-signaled"
     private const val SPAWN_FAILED = "runner-spawn-failed"
     private const val INTERNAL = "internal-error"
 
@@ -179,6 +180,8 @@ object SandboxProbe {
 
         val json = firstJsonLine(stdout)
         if (json == null) {
+            // 先看是不是被信号杀死的：那是有信息量的结论，不是"输出格式不对"。
+            signaled(exit, stderr)?.let { return it }
             return miss(
                 "$UNPARSEABLE: exit=$exit stdout=\"${snippet(stdout)}\" stderr=\"${snippet(stderr)}\""
             )
@@ -222,6 +225,56 @@ object SandboxProbe {
                     "stdout=\"${snippet(stdout)}\" stderr=\"${snippet(stderr)}\""
             )
         }
+    }
+
+    /**
+     * 被信号杀死时的结论。
+     *
+     * `exit = 128 + N` 是 POSIX 的约定，Java 在 Linux 上照搬。它经常被当成
+     * "探针坏了"（`probe-unparseable`），实际恰恰相反：**这是探针被机制杀掉的
+     * 第一手证据**。SIGSYS(31) 意味着 seccomp 在 landlock 系统调用上直接终止了
+     * 进程，连 errno 都没机会返回 —— 结论就是"内核没有可用的 landlock"，
+     * 和 ENOSYS 等价但证据更强（连系统调用入口都没进）。
+     */
+    private fun signaled(exit: Int, stderr: String): Verdict? {
+        // 只认 129..192（1..64 号信号）。125 是 runner 自己的失败码，0 是成功，
+        // 其它超出范围的按原样归到 unparseable。
+        if (exit <= 128 || exit > 128 + 64) return null
+        val sig = exit - 128
+        val name = signalName(sig)
+        val why = when (sig) {
+            31 -> "seccomp terminated the landlock syscall (SIGSYS): the kernel has no usable landlock"
+            9 -> "killed before it could report (SIGKILL): OOM or the system reaped it, retry once"
+            4, 5, 6, 7, 8, 11 -> "the runner crashed inside itself, not a kernel refusal"
+            else -> "terminated by $name before it could report"
+        }
+        val detail = firstLine(stderr)
+        return Verdict(
+            usable = false,
+            runnerPath = null,
+            errno = null,
+            // stage 标成 signal：describe() 里一眼区分"landlock 调用阶段失败"和
+            // "进程根本没活到返回"。
+            stage = "signal",
+            abi = null,
+            partial = false,
+            reason = "$SIGNALED: $name($sig) — $why" + (if (detail.isEmpty()) "" else "; $detail"),
+        )
+    }
+
+    /** 只列 runner 在设备上真会遇到的那几个；其余回显编号，不猜名字。 */
+    private fun signalName(sig: Int): String = when (sig) {
+        4 -> "SIGILL"
+        5 -> "SIGTRAP"
+        6 -> "SIGABRT"
+        7 -> "SIGBUS"
+        8 -> "SIGFPE"
+        9 -> "SIGKILL"
+        11 -> "SIGSEGV"
+        13 -> "SIGPIPE"
+        15 -> "SIGTERM"
+        31 -> "SIGSYS"
+        else -> "SIG$sig"
     }
 
     /**

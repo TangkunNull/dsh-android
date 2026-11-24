@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Adaptive icon background. Same value as the placeholder art so the two
+         layers meet without a seam when the launcher masks them. -->
+    <color name="ic_launcher_background">#14161A</color>
+</resources>

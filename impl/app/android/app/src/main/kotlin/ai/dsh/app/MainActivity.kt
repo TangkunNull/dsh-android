@@ -3,6 +3,7 @@ package ai.dsh.app
 import ai.dsh.harness.HarnessService
 import ai.dsh.harness.HarnessStatus
 import ai.dsh.harness.LlmConfig
+import ai.dsh.harness.RuntimeUnpacker
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -83,6 +84,18 @@ class HostChannel(private val context: Context) : MethodChannel.MethodCallHandle
     private val statusFile get() = HarnessStatus.file(context)
     private val log get() = File(filesDir, "harness.log")
 
+    companion object {
+        /**
+         * 「这条记录是本次写的吗」的容差。
+         *
+         * status 由 `:harness` 进程写、由本进程读，写入时刻与「本次等待开始」
+         * 的判定之间一定有毫秒级抖动；2 秒足够盖住它（也盖住一台卡顿设备上
+         * 两次 `System.currentTimeMillis()` 的偏差），又远小于一次冷启动
+         * （十几秒），所以不会把「刚重启的运行时」误放行成「上次的残留」。
+         */
+        private const val STALE_TOLERANCE_MS = 2_000L
+    }
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "paths" -> result.success(
@@ -97,6 +110,27 @@ class HostChannel(private val context: Context) : MethodChannel.MethodCallHandle
             "startHarness" -> {
                 HarnessService.start(context)
                 result.success(true)
+            }
+
+            // 首次启动（或 APK 升级后）要展开 16 453 个文件，30-40 秒；平时启动
+            // 一两秒就进主界面。UI 靠这个结论决定要不要摆完整加载清单 —— 放原生
+            // 侧判断是因为它要读 zip 里的 runtime.json，Dart 侧没有这个能力，而
+            // 从日志猜会被上一次启动的残留行骗到。
+            "bootInfo" -> io.execute {
+                val dir = File(filesDir, HarnessService.RUNTIME_DIR_NAME)
+                val needs = try {
+                    RuntimeUnpacker.needsUnpack(context, dir)
+                } catch (e: Exception) {
+                    true
+                }
+                main.post {
+                    result.success(
+                        mapOf(
+                            "needsUnpack" to needs,
+                            "runtimeDir" to dir.absolutePath,
+                        )
+                    )
+                }
             }
 
             "stopHarness" -> {
@@ -134,6 +168,10 @@ class HostChannel(private val context: Context) : MethodChannel.MethodCallHandle
             // 阻塞等待 —— 这里读的是几十字节，代价可忽略。
             "status" -> result.success(readStatus())
 
+            // 轻量、**不阻塞**的一次性读取：握手被拒之后 Dart 会再问一次，看
+            // 运行时有没有重新发布 token（每个 node 进程的 token 都是新生成的）。
+            // 刻意不复用 "awaitReady"：那个会一直等到就绪或超时，用在这里等于
+            // 把一次「重试一次握手」变成「再卡两分钟」。
             "endpoint" -> result.success(readEndpoint())
 
             "log" -> result.success(
@@ -195,11 +233,22 @@ class HostChannel(private val context: Context) : MethodChannel.MethodCallHandle
     }
 
     /**
-     * 等到「真的能用」，而不是等到「文件出现」。
+     * 等到「真的能用」，而不是等到「文件出现」，也不是等到「文件里有 running」。
      *
-     * 就绪条件必须同时满足 running 与 endpoint 可读：service 写下 running 时
-     * node 只是起来了，socket 还要等 Node 自己 listen 完才写 endpoint，中间
-     * 有一个真实的窗口。失败则立刻返回，不让用户对着进度条干等超时。
+     * 就绪条件必须同时满足三条：
+     *   1. state = running；
+     *   2. endpoint 可读；
+     *   3. **这一对记录是本次等待开始之后写的**（status 的 updatedAt、endpoint
+     *      的 mtime 都不早于 `waitStartedAt - 容差`）。
+     *
+     * 第三条是 0.1.18 真机事故的根因修复。覆盖安装、或服务进程被系统重启之后
+     * `filesDir` 不会清空：上一轮的 `status.json`（state=running）和上一轮的
+     * `harness.endpoint.json`（**旧 token**）都还在。新 node 进程要十几秒才写
+     * 自己的 endpoint，而第 0 次循环就同时读到了这两份残留 —— 于是把「旧
+     * running + 旧 token」当成就绪返回，Flutter 拿旧 token 连**新** socket，
+     * 被 `bridge-server.mjs` 的 `tokenMatches` 拒掉。
+     *
+     * 失败则立刻返回，不让用户对着进度条干等超时；但同样只认本次写的失败。
      *
      * 返回 `{status: <状态文件内容|null>, endpoint: <endpoint|null>}`：两端都
      * 原样带回，Dart 侧不猜原因，只把 status 显示给用户。
@@ -207,18 +256,24 @@ class HostChannel(private val context: Context) : MethodChannel.MethodCallHandle
     private fun awaitReady(timeoutMs: Long): Map<String, Any?> {
         val waitStartedAt = System.currentTimeMillis()
         val deadline = waitStartedAt + timeoutMs
+        val freshAfter = waitStartedAt - STALE_TOLERANCE_MS
         while (true) {
             val status = readStatus()
             val endpoint = readEndpoint()
             val state = status?.get("state") as? String
-            // 「上次运行」留下的 failed 不能当成本次结果：用户点过停止、或上一次
-            // 崩了之后重启 App，服务还没写第一行就会被误判成启动失败。只认本次
-            // 等待开始之后写的失败（文件里没有时间戳时按旧记录处理）。
-            val stale = ((status?.get("updatedAt") as? Long) ?: 0L) < waitStartedAt
-            if (state == HarnessStatus.STATE_RUNNING && endpoint != null) {
+            // 「上次运行」留下的记录不能当成本次结果：用户点过停止、上一次崩了
+            // 之后重启 App、或者服务进程被系统重启过，都会留下旧文件。只认本次
+            // 等待开始之后写的那一份（文件里没有时间戳时按旧记录处理）。
+            val updatedAt = (status?.get("updatedAt") as? Long) ?: 0L
+            val statusFresh = updatedAt >= freshAfter
+            if (state == HarnessStatus.STATE_RUNNING &&
+                endpoint != null &&
+                statusFresh &&
+                endpointIsFresh(updatedAt, freshAfter)
+            ) {
                 return mapOf("status" to status, "endpoint" to endpoint)
             }
-            if (state == HarnessStatus.STATE_FAILED && !stale) {
+            if (state == HarnessStatus.STATE_FAILED && statusFresh) {
                 return mapOf("status" to status, "endpoint" to endpoint)
             }
             if (System.currentTimeMillis() >= deadline) {
@@ -227,6 +282,26 @@ class HostChannel(private val context: Context) : MethodChannel.MethodCallHandle
             // 120 ms 与 waitEndpoint 的 80 ms 同量级：首帧之后 UI 只关心秒级变化。
             Thread.sleep(120)
         }
+    }
+
+    /**
+     * endpoint 有没有 updatedAt，用文件 mtime 与 status 的 updatedAt 对齐。
+     *
+     * 时间顺序是确定的：service 写 `running` 在 node 进程起来之后、`listen`
+     * 之前；Node 在 listen 成功后写 endpoint —— 正常启动里 endpoint 只会比
+     * status 新，所以「不早于 status 的 updatedAt（减去容差）」就是「同一个
+     * 运行时写的」。
+     *
+     * 幂等启动（服务已经在跑，`startHarness` 不重写 node）是唯一会让 endpoint
+     * 比 status 旧的情形；配套的 `HarnessService.refreshRunningStatus` 会把两个文件的
+     * 时间戳一起拉到 now，所以这个不变量在那条路上也成立。两处必须一起看。
+     */
+    private fun endpointIsFresh(statusUpdatedAt: Long, freshAfter: Long): Boolean {
+        if (!endpoint.exists()) return false
+        val mtime = endpoint.lastModified()
+        if (mtime <= 0L) return false
+        if (mtime < freshAfter - STALE_TOLERANCE_MS) return false
+        return mtime >= statusUpdatedAt - STALE_TOLERANCE_MS
     }
 
     /**
