@@ -7,7 +7,7 @@
 
 | 制品 | 体积 | versionCode | libnode | 下载 |
 |---|---|---|---|---|
-| `dsh-android-0.1.23-release.apk` | 73 MB | 19 | full（small-icu） | GitHub Release `v0.1.23` |
+| `dsh-android-0.1.23-release.apk` | 73 MB | 19 | full（small-icu） | [Release v0.1.23](https://github.com/TangkunNull/dsh-android/releases/tag/v0.1.23) |
 | `dsh-probe-0.1.17-release.apk` | 54 MB | 13 | full（small-icu） | 本地产出（未发 Release） |
 
 主应用（`ai.dsh.app`）：Flutter 原生 UI，桌面名称 **DSH Android**，连同一套 harness，是最终交付形态。
